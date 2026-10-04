@@ -1,5 +1,6 @@
 mod advisor;
 mod api;
+mod datapack;
 mod gsi;
 mod models;
 mod overlay;

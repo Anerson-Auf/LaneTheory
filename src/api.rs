@@ -24,7 +24,7 @@ pub struct HeroBracketWinrates {
     pub overall_wr: f32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AbilityData {
     pub cooldowns: Vec<i32>,
     pub image_url: String,
@@ -99,14 +99,69 @@ impl DotaApiClient {
 
         // Instantly load embedded constants (127 heroes, 501 items)
         instance.load_embedded_data();
+        instance.load_data_pack();
 
         instance.load_or_fetch_heroes().await;
         instance.load_or_fetch_items().await;
         instance.load_or_fetch_hero_stats().await;
         instance.load_or_fetch_abilities().await;
         instance.load_or_fetch_hero_abilities().await;
+        instance.write_data_pack();
 
         instance
+    }
+
+    fn load_data_pack(&mut self) {
+        if !crate::datapack::DataPack::exists() {
+            return;
+        }
+        match crate::datapack::DataPack::load() {
+            Ok(pack) => {
+                self.replace_heroes(pack.heroes().to_vec());
+                self.replace_items(pack.items().to_vec());
+                if !pack.bracket_winrates().is_empty() {
+                    self.bracket_winrates = pack.bracket_winrates()
+                        .iter()
+                        .cloned()
+                        .map(|entry| (entry.hero_id, entry))
+                        .collect();
+                }
+                if !pack.abilities().is_empty() {
+                    self.abilities = pack.abilities().clone();
+                }
+                if !pack.hero_ultimate_abilities().is_empty() {
+                    self.hero_ultimate_abilities = pack.hero_ultimate_abilities().clone();
+                }
+                println!(
+                    "YPK загружен: {} героев, {} предметов, {} способностей",
+                    self.heroes.len(),
+                    self.items_by_id.len(),
+                    self.abilities.len()
+                );
+            }
+            Err(error) => {
+                eprintln!("YPK не загружен; использую bootstrap-кэш: {error}");
+            }
+        }
+    }
+
+    fn write_data_pack(&self) {
+        let mut heroes = self.heroes.values().cloned().collect::<Vec<_>>();
+        heroes.sort_by_key(|hero| hero.id);
+        let mut items = self.items_by_id.values().cloned().collect::<Vec<_>>();
+        items.sort_by_key(|item| item.id);
+        let mut bracket_winrates = self.bracket_winrates.values().cloned().collect::<Vec<_>>();
+        bracket_winrates.sort_by_key(|entry| entry.hero_id);
+        match crate::datapack::DataPack::write(
+            heroes,
+            items,
+            bracket_winrates,
+            self.abilities.clone(),
+            self.hero_ultimate_abilities.clone(),
+        ) {
+            Ok(path) => println!("YPK обновлён: {}", path.display()),
+            Err(error) => eprintln!("Не удалось обновить YPK: {error}"),
+        }
     }
 
     async fn load_or_fetch_heroes(&mut self) {
@@ -142,6 +197,15 @@ impl DotaApiClient {
         println!("Героев загружено: {}", self.heroes.len());
     }
 
+    fn replace_heroes(&mut self, heroes: Vec<HeroData>) {
+        self.heroes.clear();
+        self.heroes_by_name.clear();
+        for hero in heroes {
+            self.heroes_by_name.insert(hero.name.clone(), hero.clone());
+            self.heroes.insert(hero.id, hero);
+        }
+    }
+
     async fn load_or_fetch_items(&mut self) {
         let cache_file = format!("{CACHE_DIR}/items.json");
 
@@ -158,17 +222,17 @@ impl DotaApiClient {
         // embedded data still keep the overlay functional offline.
         println!("Проверка актуальности item schema из OpenDota...");
         match self.client.get("https://api.opendota.com/api/constants/items")
+            // Some VPN/proxy paths serve a malformed compressed response for
+            // this endpoint.  Asking for identity avoids a decode failure and
+            // costs very little for an item schema requested once at startup.
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .timeout(std::time::Duration::from_secs(8))
             .send().await
         {
-            Ok(resp) if resp.status().is_success() => match resp.json::<HashMap<String, serde_json::Value>>().await {
+            Ok(resp) if resp.status().is_success() => match resp.text().await {
+                Ok(body) => match serde_json::from_str::<HashMap<String, serde_json::Value>>(&body) {
                 Ok(raw_items) => {
-                    let item_list = raw_items.into_iter().map(|(raw_name, val)| ItemData {
-                        id: val["id"].as_u64().unwrap_or(0) as u32,
-                        localized_name: val["dname"].as_str().unwrap_or(&raw_name).to_string(),
-                        cost: val["cost"].as_u64().map(|cost| cost as u32),
-                        name: raw_name,
-                    }).collect::<Vec<_>>();
+                    let item_list = Self::parse_item_schema(raw_items);
                     if item_list.len() >= 300 {
                         let _ = fs::write(&cache_file, serde_json::to_string(&item_list).unwrap_or_default());
                         self.replace_items(item_list);
@@ -178,6 +242,8 @@ impl DotaApiClient {
                     }
                 }
                 Err(error) => eprintln!("Не удалось разобрать item schema; оставляю кэш: {error}"),
+                },
+                Err(error) => eprintln!("Не удалось прочитать item schema; оставляю кэш: {error}"),
             },
             Ok(resp) => eprintln!("OpenDota item schema вернул HTTP {}; оставляю кэш", resp.status()),
             Err(error) => eprintln!("Не удалось обновить item schema за 8с; работаю с кэшем: {error}"),
@@ -195,9 +261,21 @@ impl DotaApiClient {
         }
     }
 
+    fn parse_item_schema(raw_items: HashMap<String, serde_json::Value>) -> Vec<ItemData> {
+        raw_items.into_iter().filter_map(|(raw_name, val)| {
+            let id = val.get("id").and_then(|id| id.as_u64())? as u32;
+            Some(ItemData {
+                id,
+                localized_name: val.get("dname").and_then(|name| name.as_str()).unwrap_or(&raw_name).to_string(),
+                cost: val.get("cost").and_then(|cost| cost.as_u64()).map(|cost| cost as u32),
+                name: raw_name,
+            })
+        }).collect()
+    }
+
     async fn load_or_fetch_hero_stats(&mut self) {
         let cache_file = format!("{CACHE_DIR}/hero_stats.json");
-        let mut loaded = false;
+        let mut loaded = !self.bracket_winrates.is_empty();
 
         // Keep genuine rank statistics available even before the first
         // successful network request (or while OpenDota is unreachable).
@@ -279,6 +357,10 @@ impl DotaApiClient {
     }
 
     async fn load_or_fetch_abilities(&mut self) {
+        if !self.abilities.is_empty() {
+            println!("Способностей из YPK загружено: {}", self.abilities.len());
+            return;
+        }
         let cache_file = format!("{CACHE_DIR}/abilities.json");
         let raw = match fs::read_to_string(&cache_file) {
             Ok(cached) => serde_json::from_str::<HashMap<String, serde_json::Value>>(&cached).ok(),
@@ -330,6 +412,10 @@ impl DotaApiClient {
     }
 
     async fn load_or_fetch_hero_abilities(&mut self) {
+        if !self.hero_ultimate_abilities.is_empty() {
+            println!("Ультимейтов героев из YPK загружено: {}", self.hero_ultimate_abilities.len());
+            return;
+        }
         let cache_file = format!("{CACHE_DIR}/hero_abilities.json");
         let raw = match fs::read_to_string(&cache_file) {
             Ok(cached) => serde_json::from_str::<HashMap<String, serde_json::Value>>(&cached).ok(),
@@ -668,5 +754,18 @@ mod tests {
         };
         assert_eq!(stats.get_winrate(RankBracket::Herald), 55.5);
         assert_eq!(stats.get_winrate(RankBracket::Immortal), 51.0);
+    }
+
+    #[test]
+    fn parses_opendota_object_item_schema() {
+        let raw = serde_json::from_str::<HashMap<String, serde_json::Value>>(r#"{
+            "blink": {"id": 1, "dname": "Blink Dagger", "cost": 2250},
+            "broken": {"dname": "Broken"}
+        }"#).unwrap();
+        let items = DotaApiClient::parse_item_schema(raw);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "blink");
+        assert_eq!(items[0].localized_name, "Blink Dagger");
+        assert_eq!(items[0].cost, Some(2250));
     }
 }
