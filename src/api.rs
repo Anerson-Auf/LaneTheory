@@ -170,7 +170,10 @@ impl DotaApiClient {
     pub fn has_publishable_data_pack(&self) -> bool {
         self.heroes.len() >= 100
             && self.items_by_id.len() >= 300
-            && self.bracket_winrates.len() >= 100
+            // OpenDota can legitimately omit brackets for a portion of the
+            // roster (the public CI response currently carries 94 entries),
+            // so require broad coverage rather than an impossible 100%.
+            && self.bracket_winrates.len() >= 80
             && self.abilities.len() >= 1_000
             && self.hero_ultimate_abilities.len() >= 100
     }
