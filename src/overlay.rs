@@ -293,6 +293,9 @@ pub struct OverlayApp {
     vision_candidates: Vec<crate::vision::VisionCandidate>,
     vision_status: String,
     vision_capture_in_progress: bool,
+    /// Strategy Time captures cards for later review only. A user-triggered
+    /// F10 remains the explicit request to replace the live Vision snapshot.
+    vision_apply_detected_picks: bool,
     vision_enemy_is_right: bool,
     vision_capture_available: bool,
     vision_clear_confirmation: bool,
@@ -425,7 +428,7 @@ impl OverlayApp {
         self.set_click_through(false);
     }
 
-    fn start_vision_scan(&mut self, live_state: &LiveGameState) {
+    fn start_vision_scan(&mut self, live_state: &LiveGameState, apply_detected_picks: bool) {
         if self.vision_rx.is_some() {
             return;
         }
@@ -446,6 +449,7 @@ impl OverlayApp {
         let (tx, rx) = std::sync::mpsc::channel();
         self.vision_rx = Some(rx);
         self.vision_capture_in_progress = true;
+        self.vision_apply_detected_picks = apply_detected_picks;
         self.draft_picker_open = false;
         self.set_click_through(true);
         self.vision_status = "Vision: снимаю один кадр драфта…".to_string();
@@ -495,6 +499,7 @@ impl OverlayApp {
             vision_candidates: Vec::new(),
             vision_status: "Vision: по кнопке, один кадр".to_string(),
             vision_capture_in_progress: false,
+            vision_apply_detected_picks: false,
             vision_enemy_is_right: true,
             vision_capture_available: false,
             vision_clear_confirmation: false,
@@ -731,6 +736,7 @@ impl eframe::App for OverlayApp {
             self.vision_candidates.clear();
             self.vision_rx = None;
             self.vision_capture_in_progress = false;
+            self.vision_apply_detected_picks = false;
             self.vision_clear_confirmation = false;
             if finished_captured_match && !entered_new_match {
                 self.vision_review_open = true;
@@ -803,13 +809,18 @@ impl eframe::App for OverlayApp {
                 self.vision_review_search.clear();
                 self.vision_review_images.clear();
                 self.vision_review_labels.clear();
-                // F10 is a full snapshot, not an append action. Replacing the
-                // lists prevents stale early-draft heroes from surviving after
-                // all five slots have changed.
-                self.manual_enemy_heroes = result.auto_accepted_enemies.into_iter().take(5).collect();
-                self.manual_ally_heroes = result.auto_accepted_allies.into_iter().take(5).collect();
-                self.manual_draft_override = !self.manual_enemy_heroes.is_empty()
-                    || !self.manual_ally_heroes.is_empty();
+                if self.vision_apply_detected_picks {
+                    // F10 is a full snapshot, not an append action. Replacing
+                    // the lists prevents stale early-draft heroes surviving
+                    // after all five cards have changed.
+                    self.manual_enemy_heroes = result.auto_accepted_enemies.into_iter().take(5).collect();
+                    self.manual_ally_heroes = result.auto_accepted_allies.into_iter().take(5).collect();
+                    self.manual_draft_override = !self.manual_enemy_heroes.is_empty()
+                        || !self.manual_ally_heroes.is_empty();
+                } else {
+                    self.vision_status.push_str(" · ручные пики сохранены");
+                }
+                self.vision_apply_detected_picks = false;
                 self.vision_rx = None;
             }
         }
@@ -1059,12 +1070,12 @@ impl eframe::App for OverlayApp {
         // state transition so a slow counter-pick request can never make F10
         // the only chance to preserve the real draft cards.
         if entered_strategy_time {
-            self.start_vision_scan(&live_state);
+            self.start_vision_scan(&live_state, false);
         }
 
         if VISION_SCAN_TRIGGERED.swap(false, Ordering::SeqCst) {
             if is_draft_active {
-                self.start_vision_scan(&live_state);
+                self.start_vision_scan(&live_state, true);
             } else {
                 self.vision_status = "Vision: F10 работает только во время выбора героя".to_string();
             }
@@ -2166,7 +2177,7 @@ impl OverlayApp {
             }
         }
         if run_vision {
-            self.start_vision_scan(live_state);
+            self.start_vision_scan(live_state, true);
         }
         if close {
             self.draft_picker_open = false;
