@@ -76,7 +76,14 @@ impl DotaApiClient {
             .connect_timeout(std::time::Duration::from_secs(12))
             .timeout(std::time::Duration::from_secs(45))
             .http1_only()
-            .gzip(true)
+            // A few VPN/transparent-proxy paths advertise a compression
+            // encoding and then stream an undecodable body.  We deliberately
+            // request plain responses below, so do not let reqwest install an
+            // automatic decoder that can fail before JSON parsing begins.
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) DotaAssistant/1.0")
             .build()
             .unwrap_or_default();
@@ -243,8 +250,15 @@ impl DotaApiClient {
             .timeout(std::time::Duration::from_secs(8))
             .send().await
         {
-            Ok(resp) if resp.status().is_success() => match resp.text().await {
-                Ok(body) => match serde_json::from_str::<HashMap<String, serde_json::Value>>(&body) {
+            Ok(resp) if resp.status().is_success() => {
+                let content_encoding = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_ENCODING)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("identity")
+                    .to_string();
+                match resp.bytes().await {
+                Ok(body) => match serde_json::from_slice::<HashMap<String, serde_json::Value>>(&body) {
                 Ok(raw_items) => {
                     let item_list = Self::parse_item_schema(raw_items);
                     if item_list.len() >= 300 {
@@ -257,8 +271,11 @@ impl DotaApiClient {
                 }
                 Err(error) => eprintln!("Не удалось разобрать item schema; оставляю кэш: {error}"),
                 },
-                Err(error) => eprintln!("Не удалось прочитать item schema; оставляю кэш: {error}"),
-            },
+                Err(error) => eprintln!(
+                    "Не удалось прочитать item schema (Content-Encoding: {content_encoding}); оставляю кэш: {error}"
+                ),
+            }
+            }
             Ok(resp) => eprintln!("OpenDota item schema вернул HTTP {}; оставляю кэш", resp.status()),
             Err(error) => eprintln!("Не удалось обновить item schema за 8с; работаю с кэшем: {error}"),
         }
