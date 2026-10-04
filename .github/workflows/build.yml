@@ -1,0 +1,55 @@
+name: Build LaneTheory
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Run focused tests
+        shell: pwsh
+        env:
+          CARGO_BUILD_JOBS: 6
+          RUST_TEST_THREADS: 6
+        run: cargo test --bin lanetheory -- --test-threads=6
+
+      - name: Build release binary
+        shell: pwsh
+        env:
+          CARGO_BUILD_JOBS: 6
+        run: cargo build --release --bin lanetheory
+
+      - name: Prepare portable artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/lanetheory.exe dist/LaneTheory.exe
+          Copy-Item run.bat dist/run.bat
+          Copy-Item README.md dist/README.md
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaneTheory-windows-x64
+          path: dist/
+          if-no-files-found: error

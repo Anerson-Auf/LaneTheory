@@ -1,0 +1,20 @@
+/target/
+/dist/
+
+# Runtime data and local state.  The three bootstrap snapshots below are
+# explicitly added to Git because the executable embeds them for offline use.
+/cache/matchups/
+/cache/popularity/
+/cache/vision_portraits/
+/cache/vision_last_scan.png
+/cache/abilities.json
+/cache/hero_abilities.json
+/cache/hero_stats_sample.json
+/cache/settings.json
+/settings.json
+
+# Local artifacts and credentials must never be published.
+*.ypk
+*.log
+.env
+.env.*
