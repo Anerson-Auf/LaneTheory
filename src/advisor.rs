@@ -628,7 +628,6 @@ impl Advisor {
         .unwrap_or(PlayerPosition::Pos1Carry)
     }
 }
-
 fn format_adv(adv: f32) -> String {
     format!("{:.1}", adv)
 }
