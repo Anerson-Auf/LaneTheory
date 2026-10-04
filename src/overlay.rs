@@ -1887,9 +1887,7 @@ impl OverlayApp {
                                 for hero in &picker_options {
                                     ui.label(egui::RichText::new(&hero.localized_name).size(10.0));
                                     if let Some((slot, is_enemy)) = learning_slot {
-                                        let at_capacity = if is_enemy { self.manual_enemy_heroes.len() >= 5 } else { self.manual_ally_heroes.len() >= 5 };
-                                        if ui.add_enabled(!at_capacity,
-                                            egui::Button::new(egui::RichText::new("Запомнить").size(9.0)).corner_radius(4)
+                                        if ui.add(egui::Button::new(egui::RichText::new("Запомнить").size(9.0)).corner_radius(4)
                                         ).on_hover_text(format!("Сохранить этот образ для слота {}", slot % 5 + 1)).clicked() {
                                             add_pick = Some((hero.name.clone(), is_enemy, Some(slot)));
                                         }
