@@ -298,6 +298,7 @@ pub struct OverlayApp {
     manual_ultimate_levels: HashMap<String, u8>,
     draft_picker_open: bool,
     previous_game_state: String,
+    previous_match_id: Option<String>,
 
     // Local visual test mode, never used in a real match.
     test_enemies: Vec<String>,
@@ -453,6 +454,7 @@ impl OverlayApp {
             manual_ultimate_levels: HashMap::new(),
             draft_picker_open: false,
             previous_game_state: String::new(),
+            previous_match_id: None,
             test_enemies: vec![
                 "phantom_assassin".to_string(),
                 "pudge".to_string(),
@@ -631,19 +633,29 @@ impl eframe::App for OverlayApp {
             (st.clone(), st.enemy_heroes.clone(), st.my_hero_name.clone())
         };
 
-        // Do not carry manually entered enemies into a subsequent match.  GSI
-        // reliably transitions back to menu at the end of a completed game.
-        if live_state.game_state == "menu"
+        // Do not carry manually entered heroes into a subsequent match. GSI
+        // can stop after a game and resume at the next draft without a menu
+        // payload, so match_id is the primary boundary.
+        let entered_new_match = self.previous_match_id.is_some()
+            && live_state.match_id.is_some()
+            && self.previous_match_id != live_state.match_id;
+        if (live_state.game_state == "menu"
             && !self.previous_game_state.is_empty()
-            && self.previous_game_state != "menu"
+            && self.previous_game_state != "menu")
+            || entered_new_match
         {
             self.manual_enemy_heroes.clear();
             self.manual_ally_heroes.clear();
             self.manual_enemy_search.clear();
             self.manual_ultimate_levels.clear();
             self.draft_picker_open = false;
+            self.vision_candidates.clear();
+            self.vision_rx = None;
+            self.vision_capture_in_progress = false;
+            self.vision_status = "Vision: по кнопке, один кадр".to_string();
         }
         self.previous_game_state = live_state.game_state.clone();
+        self.previous_match_id = live_state.match_id.clone();
 
         // Auto-hide when Dota 2 is not the active foreground window
         // (Overlay will not show over browser, Discord, Telegram, etc.)
@@ -1834,10 +1846,19 @@ impl OverlayApp {
                                         .any(|hero| hero == &candidate.hero_name);
                                     let side = if candidate.is_enemy { "В" } else { "С" };
                                     let is_full = if candidate.is_enemy { self.manual_enemy_heroes.len() >= 5 } else { self.manual_ally_heroes.len() >= 5 };
-                                    let caption = format!("{side}: {} {:.0}%", candidate.localized_name, candidate.confidence * 100.0);
+                                    let caption = format!(
+                                        "{side}: {} · d{}/64",
+                                        candidate.localized_name,
+                                        candidate.distance
+                                    );
                                     if ui.add_enabled(!selected && !is_full,
                                         egui::Button::new(egui::RichText::new(caption).size(9.5)).corner_radius(4)
-                                    ).on_hover_text(format!("Слот {} · запас до №2: {:.1}%", candidate.slot + 1, candidate.margin * 100.0)).clicked() {
+                                    ).on_hover_text(format!(
+                                        "Слот {} · Hamming distance {}/64 · запас до следующего героя: {} бит",
+                                        candidate.slot + 1,
+                                        candidate.distance,
+                                        candidate.margin
+                                    )).clicked() {
                                         if candidate.is_enemy { add_enemy = Some(candidate.hero_name.clone()); }
                                         else { add_ally = Some(candidate.hero_name.clone()); }
                                     }

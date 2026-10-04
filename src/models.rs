@@ -209,6 +209,10 @@ pub struct LiveGameState {
     /// Local listener health, shown when Dota has not connected yet.
     pub gsi_listener_status: String,
     pub game_state: String,
+    /// Dota's stable identifier for the current game. It is the only
+    /// reliable boundary when GSI stops sending payloads after a match and
+    /// resumes directly at the following draft without a menu event.
+    pub match_id: Option<String>,
     pub clock_time: i32,
     pub is_day: bool,
     pub my_hero_name: Option<String>,
@@ -251,6 +255,7 @@ impl Default for LiveGameState {
             is_connected: false,
             gsi_listener_status: "GSI listener запускается".to_string(),
             game_state: "menu".to_string(),
+            match_id: None,
             clock_time: -999,
             is_day: true,
             my_hero_name: None,
@@ -290,6 +295,7 @@ impl Default for LiveGameState {
 impl LiveGameState {
     pub fn reset_to_menu(&mut self) {
         self.game_state = "menu".to_string();
+        self.match_id = None;
         self.clock_time = -999;
         self.is_day = true;
         self.my_hero_name = None;
@@ -547,6 +553,7 @@ mod tests {
     fn returning_to_menu_clears_match_only_state() {
         let mut state = LiveGameState {
             game_state: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+            match_id: Some("12345".into()),
             clock_time: 900,
             my_hero_name: Some("npc_dota_hero_huskar".into()),
             enemy_heroes: vec!["npc_dota_hero_axe".into()],
@@ -563,6 +570,7 @@ mod tests {
         state.reset_to_menu();
 
         assert_eq!(state.game_state, "menu");
+        assert!(state.match_id.is_none());
         assert_eq!(state.clock_time, -999);
         assert!(state.my_hero_name.is_none());
         assert!(state.enemy_heroes.is_empty());

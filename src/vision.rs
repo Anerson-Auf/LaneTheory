@@ -6,15 +6,12 @@
 
 use crate::models::HeroData;
 use image::{DynamicImage, GenericImageView};
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const PORTRAIT_CACHE: &str = "cache/vision_portraits";
-// 16×9 discards the face/silhouette that separates visually similar heroes.
-// Vision is a one-shot action, so a 32×18 descriptor is still inexpensive.
-const GRID_W: u32 = 32;
-const GRID_H: u32 = 18;
 // Dota's top player cards are not a 120 px grid at 1920: the right bank has
 // a measured 122 px pitch. Keeping the coordinates explicit prevents a
 // growing leftward error on slots 2–5.
@@ -25,22 +22,24 @@ const SLOT_CENTRES: [f32; 10] = [
 // The visible player-card artwork is ~75 px tall at a 1080 px client.  The
 // former 58 px crop cut off the lower part of every hero portrait.
 const TOP_CARD_ART_HEIGHT: f32 = 0.069;
-// `similarity` is a normalized image-distance score, not a calibrated
-// probability.  Real Dota HUD cards against the public portrait assets land
-// around 0.40–0.55, so treating 0.73 as "73% certain" made every valid match
-// look uncertain and silently disabled the feature.
-const AUTO_ACCEPT_SCORE: f32 = 0.52;
-const AUTO_ACCEPT_MARGIN: f32 = 0.025;
 const DRAFT_CARD_ASPECT: f32 = 1.39;
+const PHASH_SIZE: usize = 8;
+const PHASH_INPUT_SIZE: usize = PHASH_SIZE * 4;
+const MAX_HAMMING_DISTANCE: u32 = 19; // round(0.30 * 64)
+const MIN_HAMMING_MARGIN: u32 = 3; // round(0.05 * 64)
+const SHIFT_FRACTION: f32 = 0.03;
+const SHIFT_STEPS: i32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct VisionCandidate {
     pub hero_name: String,
     pub localized_name: String,
-    pub confidence: f32,
-    /// Difference from the next closest portrait template. A raw image score
-    /// alone is not enough to safely auto-apply similar blue portraits.
-    pub margin: f32,
+    /// Hamming distance of the best 64-bit perceptual hash. This is a real
+    /// metric, not a UI-looking percentage: lower is better.
+    pub distance: u8,
+    /// Difference to the closest *other* hero in Hamming bits. Higher means
+    /// the recognition is less ambiguous.
+    pub margin: u8,
     pub slot: usize,
     pub is_enemy: bool,
 }
@@ -57,7 +56,7 @@ pub struct VisionResult {
 struct PortraitTemplate {
     hero_name: String,
     localized_name: String,
-    descriptor: Vec<f32>,
+    hash: u64,
 }
 
 /// Capture exactly one frame and classify the five portrait slots of the enemy
@@ -86,49 +85,25 @@ pub async fn scan_enemy_draft(
     let mut candidates = Vec::new();
     let enemy_slots = if enemy_is_right { [5, 6, 7, 8, 9] } else { [0, 1, 2, 3, 4] };
     let ally_slots = if enemy_is_right { [0, 1, 2, 3, 4] } else { [5, 6, 7, 8, 9] };
-    let mut already_seen = HashSet::new();
     for (is_enemy, slots) in [(true, enemy_slots), (false, ally_slots)] {
-    for slot in slots {
-        let sample = slot_descriptor(&frame, slot);
-        let Some(sample) = sample else { continue };
-        let mut best: Option<(&PortraitTemplate, f32)> = None;
-        let mut runner_up = 0.0_f32;
-        for template in &templates {
-            if already_seen.contains(&template.hero_name) { continue; }
-            let score = similarity(&sample, &template.descriptor);
-            if best.as_ref().is_none_or(|(_, old)| score > *old) {
-                runner_up = best.map(|(_, old)| old).unwrap_or(0.0);
-                best = Some((template, score));
-            } else if score > runner_up {
-                runner_up = score;
+        for slot in slots {
+            let Some(query_hashes) = slot_hashes(&frame, slot) else {
+                continue;
+            };
+            if let Some((template, distance, margin)) = best_match(&query_hashes, &templates) {
+                candidates.push(VisionCandidate {
+                    hero_name: template.hero_name.clone(),
+                    localized_name: template.localized_name.clone(),
+                    distance: distance as u8,
+                    margin: margin as u8,
+                    slot,
+                    is_enemy,
+                });
             }
         }
-        if let Some((template, confidence)) = best {
-            // Always expose the best candidate. A low score is still valuable
-            // diagnostics and lets the player correct it in the draft picker;
-            // only cards above the empirical image-match floor are applied.
-            already_seen.insert(template.hero_name.clone());
-            candidates.push(VisionCandidate {
-                hero_name: template.hero_name.clone(),
-                localized_name: template.localized_name.clone(),
-                confidence,
-                margin: (confidence - runner_up).max(0.0),
-                slot,
-                is_enemy,
-            });
-        }
     }
-    }
-    // Similar portraits (notably Crystal Maiden/Naga) may produce a usable
-    // score but virtually no lead over the runner-up. Keep those visible for
-    // correction instead of silently making a false draft decision.
-    let is_reliable = |candidate: &VisionCandidate| {
-        candidate.confidence >= AUTO_ACCEPT_SCORE && candidate.margin >= AUTO_ACCEPT_MARGIN
-    };
-    let auto_accepted_enemies = candidates.iter().filter(|candidate| candidate.is_enemy && is_reliable(candidate))
-        .map(|candidate| candidate.hero_name.clone()).collect::<Vec<_>>();
-    let auto_accepted_allies = candidates.iter().filter(|candidate| !candidate.is_enemy && is_reliable(candidate))
-        .map(|candidate| candidate.hero_name.clone()).collect::<Vec<_>>();
+    let auto_accepted_enemies = accepted_unique_heroes(&candidates, true);
+    let auto_accepted_allies = accepted_unique_heroes(&candidates, false);
     let accepted_enemies_count = auto_accepted_enemies.len();
     let accepted_allies_count = auto_accepted_allies.len();
     let accepted_count = accepted_enemies_count + accepted_allies_count;
@@ -201,12 +176,12 @@ fn load_templates(heroes: &[HeroData]) -> Vec<PortraitTemplate> {
         Some(PortraitTemplate {
             hero_name: hero.name.clone(),
             localized_name: hero.localized_name.clone(),
-            descriptor: image_descriptor(&image),
+            hash: portrait_hash(&image)?,
         })
     }).collect()
 }
 
-fn image_descriptor(image: &DynamicImage) -> Vec<f32> {
+fn portrait_hash(image: &DynamicImage) -> Option<u64> {
     let (width, height) = image.dimensions();
     let rgba = image.to_rgba8();
     // The top draft card is rendered with background-size: cover. Its visible
@@ -226,7 +201,7 @@ fn image_descriptor(image: &DynamicImage) -> Vec<f32> {
     }.clamp(1, height);
     let offset_x = (width - crop_width) / 2;
     let offset_y = (height - crop_height) / 2;
-    descriptor_from_pixels(crop_width, crop_height, |x, y| {
+    perceptual_hash(crop_width, crop_height, |x, y| {
         let pixel = rgba.get_pixel(offset_x + x, offset_y + y).0;
         [pixel[0], pixel[1], pixel[2]]
     })
@@ -239,21 +214,32 @@ struct DesktopFrame {
     pixels: Vec<u8>,
 }
 
-fn slot_descriptor(frame: &DesktopFrame, slot: usize) -> Option<Vec<f32>> {
+fn slot_hashes(frame: &DesktopFrame, slot: usize) -> Option<Vec<u64>> {
     // Hero portrait centres in Dota's draft HUD, normalized to the Dota client.
     // The crop is deliberately inset to ignore card borders and player names.
     // Values are normalized to Dota's client area, not desktop resolution.
     let centre_x = *SLOT_CENTRES.get(slot)?;
     let crop_w = (frame.width as f32 * 0.054) as u32;
     let crop_h = (frame.height as f32 * TOP_CARD_ART_HEIGHT) as u32;
-    let x = ((frame.width as f32 * centre_x) as i32 - crop_w as i32 / 2).max(0) as u32;
-    let y = 0;
-    if x + crop_w >= frame.width || y + crop_h >= frame.height || crop_w < 16 || crop_h < 16 { return None; }
-    Some(descriptor_from_pixels(crop_w, crop_h, |cx, cy| {
-        let index = (((y + cy) * frame.width + (x + cx)) * 4) as usize;
-        // DIB is BGRA; descriptor uses RGB like the portrait templates.
-        [frame.pixels[index + 2], frame.pixels[index + 1], frame.pixels[index]]
-    }))
+    let x = ((frame.width as f32 * centre_x) as i32 - crop_w as i32 / 2).max(0) as i32;
+    let y = 0_i32;
+    if crop_w >= frame.width || crop_h >= frame.height || crop_w < 16 || crop_h < 16 {
+        return None;
+    }
+    let mut hashes = Vec::with_capacity(((SHIFT_STEPS * 2 + 1).pow(2)) as usize);
+    for dy in -SHIFT_STEPS..=SHIFT_STEPS {
+        for dx in -SHIFT_STEPS..=SHIFT_STEPS {
+            let shifted_x = (x + (dx as f32 * SHIFT_FRACTION * crop_w as f32).round() as i32)
+                .clamp(0, (frame.width - crop_w) as i32) as u32;
+            let shifted_y = (y + (dy as f32 * SHIFT_FRACTION * crop_h as f32).round() as i32)
+                .clamp(0, (frame.height - crop_h) as i32) as u32;
+            hashes.push(perceptual_hash(crop_w, crop_h, |cx, cy| {
+                let index = (((shifted_y + cy) * frame.width + (shifted_x + cx)) * 4) as usize;
+                [frame.pixels[index + 2], frame.pixels[index + 1], frame.pixels[index]]
+            })?);
+        }
+    }
+    Some(hashes)
 }
 
 /// One overwrite-only debug artifact for UI-scale calibration. It is written
@@ -288,43 +274,109 @@ fn draw_box(image: &mut image::RgbaImage, left: u32, top: u32, width: u32, heigh
     }
 }
 
-fn descriptor_from_pixels<F>(width: u32, height: u32, mut pixel_at: F) -> Vec<f32>
-where F: FnMut(u32, u32) -> [u8; 3] {
-    let mut colors = Vec::with_capacity((GRID_W * GRID_H * 3) as usize);
-    let mut luma = vec![0.0_f32; (GRID_W * GRID_H) as usize];
-    for gy in 0..GRID_H {
-        for gx in 0..GRID_W {
-            let x = ((gx as f32 + 0.5) * width as f32 / GRID_W as f32) as u32;
-            let y = ((gy as f32 + 0.5) * height as f32 / GRID_H as f32) as u32;
-            let rgb = pixel_at(x.min(width - 1), y.min(height - 1));
-            let rgb = rgb.map(|value| value as f32 / 255.0);
-            colors.extend(rgb);
-            luma[(gy * GRID_W + gx) as usize] = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+/// 64-bit DCT perceptual hash.  The image is reduced to 32×32 greyscale,
+/// transformed into low-frequency coefficients, then thresholded at their
+/// median. It is deliberately insensitive to brightness/scale changes that
+/// are common between Valve's portrait source and the in-game player card.
+fn perceptual_hash<F>(width: u32, height: u32, mut pixel_at: F) -> Option<u64>
+where
+    F: FnMut(u32, u32) -> [u8; 3],
+{
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let side = PHASH_INPUT_SIZE;
+    let mut luminance = vec![0.0_f32; side * side];
+    for y in 0..side {
+        for x in 0..side {
+            let source_x = (((x as f32 + 0.5) * width as f32 / side as f32) as u32)
+                .min(width - 1);
+            let source_y = (((y as f32 + 0.5) * height as f32 / side as f32) as u32)
+                .min(height - 1);
+            let [red, green, blue] = pixel_at(source_x, source_y);
+            luminance[y * side + x] = 0.2126 * red as f32
+                + 0.7152 * green as f32
+                + 0.0722 * blue as f32;
         }
     }
-    // Colour alone confuses similarly coloured heroes (e.g. Crystal Maiden
-    // and Naga). Append a coarse luminance-gradient map, which preserves face,
-    // staff and silhouette structure across the two render resolutions.
-    let mut values = colors;
-    for gy in 0..GRID_H {
-        for gx in 0..GRID_W {
-            let here = luma[(gy * GRID_W + gx) as usize];
-            let right = luma[(gy * GRID_W + (gx + 1).min(GRID_W - 1)) as usize];
-            let below = luma[((gy + 1).min(GRID_H - 1) * GRID_W + gx) as usize];
-            values.push(((right - here).abs() + (below - here).abs()).min(1.0));
+
+    let mut coefficients = [0.0_f32; PHASH_SIZE * PHASH_SIZE];
+    let factor = std::f32::consts::PI / (side as f32 * 2.0);
+    for v in 0..PHASH_SIZE {
+        for u in 0..PHASH_SIZE {
+            let mut sum = 0.0_f32;
+            for y in 0..side {
+                let vertical = ((2 * y + 1) as f32 * v as f32 * factor).cos();
+                for x in 0..side {
+                    let horizontal = ((2 * x + 1) as f32 * u as f32 * factor).cos();
+                    sum += luminance[y * side + x] * horizontal * vertical;
+                }
+            }
+            let scale_u = if u == 0 {
+                (1.0 / side as f32).sqrt()
+            } else {
+                (2.0 / side as f32).sqrt()
+            };
+            let scale_v = if v == 0 {
+                (1.0 / side as f32).sqrt()
+            } else {
+                (2.0 / side as f32).sqrt()
+            };
+            coefficients[v * PHASH_SIZE + u] = sum * scale_u * scale_v;
         }
     }
-    let mean = values.iter().sum::<f32>() / values.len() as f32;
-    let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f32>() / values.len() as f32;
-    let scale = variance.sqrt().max(0.06);
-    values.into_iter().map(|value| (value - mean) / scale).collect()
+
+    let mut non_dc = coefficients[1..].to_vec();
+    non_dc.sort_by(|left, right| left.total_cmp(right));
+    let median = non_dc[non_dc.len() / 2];
+    let mut hash = 0_u64;
+    for (index, coefficient) in coefficients.iter().enumerate().skip(1) {
+        if *coefficient > median {
+            hash |= 1_u64 << index;
+        }
+    }
+    Some(hash)
 }
 
-fn similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() { return 0.0; }
-    let mse = a.iter().zip(b).map(|(left, right)| (left - right).powi(2)).sum::<f32>() / a.len() as f32;
-    // 1.0 = identical normalized portraits, lower values = weak match.
-    (1.0 / (1.0 + mse)).clamp(0.0, 1.0)
+fn best_match<'a>(query_hashes: &[u64], templates: &'a [PortraitTemplate]) -> Option<(&'a PortraitTemplate, u32, u32)> {
+    let mut matches = templates
+        .iter()
+        .map(|template| {
+            let distance = query_hashes
+                .iter()
+                .map(|query| (query ^ template.hash).count_ones())
+                .min()
+                .unwrap_or(u32::MAX);
+            (template, distance)
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(_, distance)| *distance);
+    let (best, best_distance) = matches.first().copied()?;
+    let runner_up_distance = matches
+        .iter()
+        .find(|(candidate, _)| candidate.hero_name != best.hero_name)
+        .map(|(_, distance)| *distance)
+        .unwrap_or(64);
+    Some((best, best_distance, runner_up_distance.saturating_sub(best_distance)))
+}
+
+fn accepted_unique_heroes(candidates: &[VisionCandidate], is_enemy: bool) -> Vec<String> {
+    let mut ranked = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.is_enemy == is_enemy
+                && candidate.distance as u32 <= MAX_HAMMING_DISTANCE
+                && candidate.margin as u32 >= MIN_HAMMING_MARGIN
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|candidate| (candidate.distance, Reverse(candidate.margin)));
+    let mut seen = HashSet::new();
+    ranked
+        .into_iter()
+        .filter(|candidate| seen.insert(candidate.hero_name.clone()))
+        .map(|candidate| candidate.hero_name.clone())
+        .take(5)
+        .collect()
 }
 
 /// Capture the Dota client, not the virtual desktop.  A virtual-desktop frame
@@ -454,10 +506,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn similarity_favors_identical_portraits() {
-        let same = similarity(&[0.0, 1.0, -1.0], &[0.0, 1.0, -1.0]);
-        let different = similarity(&[0.0, 1.0, -1.0], &[3.0, -2.0, 1.5]);
-        assert!(same > different);
-        assert_eq!(same, 1.0);
+    fn perceptual_hash_preserves_identical_art_and_changes_for_inverse_art() {
+        let image = |invert: bool| {
+            perceptual_hash(32, 32, |x, y| {
+                let value = ((x * 7 + y * 11) % 255) as u8;
+                let value = if invert { 255 - value } else { value };
+                [value, value.saturating_add(x as u8 / 3), 255 - value]
+            })
+            .unwrap()
+        };
+        let first = image(false);
+        let same = image(false);
+        let inverse = image(true);
+        assert_eq!((first ^ same).count_ones(), 0);
+        assert!((first ^ inverse).count_ones() > 3);
     }
 }

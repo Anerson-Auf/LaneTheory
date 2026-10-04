@@ -59,6 +59,20 @@ async fn handle_gsi_payload(
     state.last_update_sec = now;
 
     if let Some(map) = payload.get("map") {
+        if let Some(match_id) = map.get("matchid").and_then(|value| {
+            value.as_str()
+                .map(str::to_owned)
+                .or_else(|| value.as_u64().map(|id| id.to_string()))
+        }).filter(|id| !id.is_empty() && id != "0") {
+            if state.match_id.as_deref() != Some(&match_id) {
+                let had_previous_match = state.match_id.is_some();
+                state.reset_to_menu();
+                state.match_id = Some(match_id);
+                if had_previous_match {
+                    println!("GSI: обнаружен новый matchid, состояние прошлого матча сброшено");
+                }
+            }
+        }
         if let Some(gs) = map.get("game_state").and_then(|v| v.as_str()) {
             if matches!(gs, "DOTA_GAMERULES_STATE_POST_GAME" | "DOTA_GAMERULES_STATE_DISCONNECT") {
                 state.reset_to_menu();
