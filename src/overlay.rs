@@ -22,6 +22,21 @@ static DRAFT_PICKER_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ROSHAN_HITBOXES: std::sync::Mutex<Vec<HitBox>> = std::sync::Mutex::new(Vec::new());
 static ROSHAN_ACTION: AtomicI32 = AtomicI32::new(0);
 
+/// A network-backed draft analysis must never keep the overlay in a loading
+/// state indefinitely. The result retains its signature so stale work cannot
+/// overwrite a newer draft.
+enum DraftAnalysisResult {
+    Ready {
+        signature: Vec<String>,
+        counters: Vec<RecommendedHero>,
+        situational_items: Vec<SituationalItem>,
+        weaknesses: Vec<String>,
+    },
+    TimedOut {
+        signature: Vec<String>,
+    },
+}
+
 pub const AEGIS_IMAGE_URL: &str = "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/items/aegis.png";
 pub const ROSHAN_IMAGE_URL: &str = "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/abilities/roshan_spell_block.png";
 
@@ -271,8 +286,9 @@ pub struct OverlayApp {
     draft_weaknesses: Vec<String>,
     // The signature travels with an async result so an obsolete draft request
     // cannot overwrite the analysis for a newly entered enemy.
-    draft_rx: Option<std::sync::mpsc::Receiver<(Vec<String>, Vec<RecommendedHero>, Vec<SituationalItem>, Vec<String>)>>,
+    draft_rx: Option<std::sync::mpsc::Receiver<DraftAnalysisResult>>,
     is_analyzing_draft: bool,
+    draft_analysis_error: Option<String>,
     vision_rx: Option<std::sync::mpsc::Receiver<crate::vision::VisionResult>>,
     vision_candidates: Vec<crate::vision::VisionCandidate>,
     vision_status: String,
@@ -304,6 +320,9 @@ pub struct OverlayApp {
     // GSI there. Observer/replay GSI data remains authoritative when available.
     manual_enemy_heroes: Vec<String>,
     manual_ally_heroes: Vec<String>,
+    /// When the player edits an already known draft, their corrected list is
+    /// intentionally authoritative for this match instead of stale GSI data.
+    manual_draft_override: bool,
     manual_enemy_search: String,
     manual_ultimate_levels: HashMap<String, u8>,
     draft_picker_open: bool,
@@ -391,6 +410,21 @@ impl OverlayApp {
         }
     }
 
+    fn open_pick_editor(&mut self, live_state: &LiveGameState) {
+        // If GSI did reveal a roster, display it as the starting point. It is
+        // not made authoritative until the player actually edits something.
+        if !self.manual_draft_override {
+            if !live_state.enemy_heroes.is_empty() {
+                self.manual_enemy_heroes = live_state.enemy_heroes.iter().take(5).cloned().collect();
+            }
+            if !live_state.ally_heroes.is_empty() {
+                self.manual_ally_heroes = live_state.ally_heroes.iter().take(5).cloned().collect();
+            }
+        }
+        self.draft_picker_open = true;
+        self.set_click_through(false);
+    }
+
     fn start_vision_scan(&mut self, live_state: &LiveGameState) {
         if self.vision_rx.is_some() {
             return;
@@ -456,6 +490,7 @@ impl OverlayApp {
             draft_weaknesses: Vec::new(),
             draft_rx: None,
             is_analyzing_draft: false,
+            draft_analysis_error: None,
             vision_rx: None,
             vision_candidates: Vec::new(),
             vision_status: "Vision: по кнопке, один кадр".to_string(),
@@ -481,6 +516,7 @@ impl OverlayApp {
 
             manual_enemy_heroes: Vec::new(),
             manual_ally_heroes: Vec::new(),
+            manual_draft_override: false,
             manual_enemy_search: String::new(),
             manual_ultimate_levels: HashMap::new(),
             draft_picker_open: false,
@@ -670,6 +706,8 @@ impl eframe::App for OverlayApp {
         let entered_new_match = self.previous_match_id.is_some()
             && live_state.match_id.is_some()
             && self.previous_match_id != live_state.match_id;
+        let entered_strategy_time = live_state.game_state == "DOTA_GAMERULES_STATE_STRATEGY_TIME"
+            && self.previous_game_state != "DOTA_GAMERULES_STATE_STRATEGY_TIME";
         let finished_captured_match = live_state.game_state == "menu"
             && matches!(
                 self.previous_game_state.as_str(),
@@ -683,6 +721,7 @@ impl eframe::App for OverlayApp {
         {
             self.manual_enemy_heroes.clear();
             self.manual_ally_heroes.clear();
+            self.manual_draft_override = false;
             self.manual_enemy_search.clear();
             self.manual_ultimate_levels.clear();
             // F5 is deliberately a match-local override. A fresh match starts
@@ -769,13 +808,17 @@ impl eframe::App for OverlayApp {
                 // all five slots have changed.
                 self.manual_enemy_heroes = result.auto_accepted_enemies.into_iter().take(5).collect();
                 self.manual_ally_heroes = result.auto_accepted_allies.into_iter().take(5).collect();
+                self.manual_draft_override = !self.manual_enemy_heroes.is_empty()
+                    || !self.manual_ally_heroes.is_empty();
                 self.vision_rx = None;
             }
         }
 
-        // GSI takes precedence whenever it supplies draft data; manual picks are
-        // exclusively the All Pick fallback.
-        let active_enemies: Vec<String> = if !enemies.is_empty() {
+        // GSI is authoritative by default. An explicit in-game correction is
+        // the exception: it remains authoritative until this match ends.
+        let active_enemies: Vec<String> = if self.manual_draft_override {
+            self.manual_enemy_heroes.clone()
+        } else if !enemies.is_empty() {
             enemies
         } else if !self.manual_enemy_heroes.is_empty() {
             self.manual_enemy_heroes.clone()
@@ -784,10 +827,16 @@ impl eframe::App for OverlayApp {
         } else {
             Vec::new()
         };
-        let mut active_allies = live_state.ally_heroes.clone();
-        for hero in &self.manual_ally_heroes {
-            if !active_allies.iter().any(|existing| existing == hero) {
-                active_allies.push(hero.clone());
+        let mut active_allies = if self.manual_draft_override {
+            self.manual_ally_heroes.clone()
+        } else {
+            live_state.ally_heroes.clone()
+        };
+        if !self.manual_draft_override {
+            for hero in &self.manual_ally_heroes {
+                if !active_allies.iter().any(|existing| existing == hero) {
+                    active_allies.push(hero.clone());
+                }
             }
         }
 
@@ -811,6 +860,7 @@ impl eframe::App for OverlayApp {
             if analysis_signature != self.last_enemy_signature {
             self.last_enemy_signature = analysis_signature;
             self.is_analyzing_draft = true;
+            self.draft_analysis_error = None;
 
             // Every ultimate comes from current OpenDota hero ability constants,
             // not a hand-maintained subset of "important" heroes.
@@ -861,21 +911,44 @@ impl eframe::App for OverlayApp {
             let (tx, rx) = std::sync::mpsc::channel();
             self.draft_rx = Some(rx);
             self.tokio_handle.spawn(async move {
-                let mut api = api_clone.lock().await;
-                let counters = Advisor::recommend_counter_picks(&mut api, &enemies_clone, &allies_clone, rank).await;
-                let situ = Advisor::get_situational_items(&api, &enemies_clone);
-                let weaknesses = Advisor::analyze_draft_weaknesses(&api, &enemies_clone);
-                let _ = tx.send((signature_for_result, counters, situ, weaknesses));
+                let result = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+                    let mut api = api_clone.lock().await;
+                    let counters = Advisor::recommend_counter_picks(&mut api, &enemies_clone, &allies_clone, rank).await;
+                    let situational_items = Advisor::get_situational_items(&api, &enemies_clone);
+                    let weaknesses = Advisor::analyze_draft_weaknesses(&api, &enemies_clone);
+                    (counters, situational_items, weaknesses)
+                }).await;
+                let message = match result {
+                    Ok((counters, situational_items, weaknesses)) => DraftAnalysisResult::Ready {
+                        signature: signature_for_result,
+                        counters,
+                        situational_items,
+                        weaknesses,
+                    },
+                    Err(_) => DraftAnalysisResult::TimedOut {
+                        signature: signature_for_result,
+                    },
+                };
+                let _ = tx.send(message);
             });
             }
         }
 
         if let Some(rx) = &self.draft_rx {
-            if let Ok((signature, counters, situ, weaknesses)) = rx.try_recv() {
-                if signature == self.last_enemy_signature {
-                    self.all_counters = counters;
-                    self.situational_items = situ;
-                    self.draft_weaknesses = weaknesses;
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    DraftAnalysisResult::Ready { signature, counters, situational_items, weaknesses } => {
+                        if signature == self.last_enemy_signature {
+                            self.all_counters = counters;
+                            self.situational_items = situational_items;
+                            self.draft_weaknesses = weaknesses;
+                        }
+                    }
+                    DraftAnalysisResult::TimedOut { signature } => {
+                        if signature == self.last_enemy_signature {
+                            self.draft_analysis_error = Some("Сеть не ответила за 12 с: используй ручные пики или повтори после драфта.".to_string());
+                        }
+                    }
                 }
                 self.draft_rx = None;
                 self.is_analyzing_draft = false;
@@ -975,8 +1048,19 @@ impl eframe::App for OverlayApp {
         let is_draft_active = (live_state.game_state == "DOTA_GAMERULES_STATE_HERO_SELECTION"
             || live_state.game_state == "DOTA_GAMERULES_STATE_STRATEGY_TIME")
             && !is_in_menu;
+        let is_match_active = (live_state.game_state == "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
+            || live_state.game_state == "DOTA_GAMERULES_STATE_PRE_GAME")
+            && !is_draft_active
+            && !is_in_menu;
         let show_hud = !self.vision_capture_in_progress && !self.focus_mode;
         let show_notifications = !self.vision_capture_in_progress;
+
+        // Every card is visible at Strategy Time. Capture exactly once on that
+        // state transition so a slow counter-pick request can never make F10
+        // the only chance to preserve the real draft cards.
+        if entered_strategy_time {
+            self.start_vision_scan(&live_state);
+        }
 
         if VISION_SCAN_TRIGGERED.swap(false, Ordering::SeqCst) {
             if is_draft_active {
@@ -989,19 +1073,13 @@ impl eframe::App for OverlayApp {
         // The overlay is normally click-through. The small left-panel button
         // is hit-tested globally, then opens a purpose-built draft drawer;
         // entering a hero never requires opening Settings.
-        if DRAFT_PICKER_REQUESTED.swap(false, Ordering::Relaxed) && is_draft_active {
-            self.draft_picker_open = true;
-            self.set_click_through(false);
+        if DRAFT_PICKER_REQUESTED.swap(false, Ordering::Relaxed) && (is_draft_active || is_match_active) {
+            self.open_pick_editor(&live_state);
         }
-        if !is_draft_active && self.draft_picker_open {
+        if !(is_draft_active || is_match_active) && self.draft_picker_open {
             self.draft_picker_open = false;
             self.set_click_through(!self.is_settings_open);
         }
-
-        let is_match_active = (live_state.game_state == "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
-            || live_state.game_state == "DOTA_GAMERULES_STATE_PRE_GAME")
-            && !is_draft_active
-            && !is_in_menu;
 
         // 1. Render Top Status Bar
         if show_hud && (self.settings.show_top_bar || self.is_settings_open) {
@@ -1019,7 +1097,7 @@ impl eframe::App for OverlayApp {
         } else if let Ok(mut hitbox) = DRAFT_PICKER_HITBOX.lock() {
             *hitbox = None;
         }
-        if self.draft_picker_open && is_draft_active {
+        if self.draft_picker_open && (is_draft_active || is_match_active) {
             self.render_draft_picker(&ctx, screen_w, &live_state);
         }
         if self.vision_review_open && is_in_menu {
@@ -1087,6 +1165,12 @@ impl OverlayApp {
         let win_h = 560.0;
         let win_x = ((screen_w - win_w) / 2.0).max(20.0);
         let win_y = ((screen_h - win_h) / 2.0).max(20.0);
+        let live_state = self.state.lock().ok().map(|state| state.clone()).unwrap_or_default();
+        let is_live_match = matches!(
+            live_state.game_state.as_str(),
+            "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS" | "DOTA_GAMERULES_STATE_PRE_GAME"
+        );
+        let mut open_match_picker = false;
 
         egui::Area::new(egui::Id::new("hud_settings_window"))
             .fixed_pos(egui::pos2(win_x, win_y))
@@ -1235,6 +1319,28 @@ impl OverlayApp {
                                     .color(egui::Color32::from_rgb(148, 163, 184)),
                             );
 
+                            if is_live_match {
+                                ui.add_space(7.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new("Пики текущей игры")
+                                        .color(egui::Color32::from_rgb(248, 113, 113))
+                                        .strong()
+                                        .size(12.0),
+                                );
+                                ui.label(
+                                    egui::RichText::new("Если Vision или GSI ошиблись, исправь врагов и союзников без выхода из матча.")
+                                        .size(9.5)
+                                        .color(egui::Color32::from_rgb(203, 213, 225)),
+                                );
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new("Исправить пики").size(10.0),
+                                ).corner_radius(4)).clicked() {
+                                    open_match_picker = true;
+                                }
+                            }
+
                             ui.add_space(8.0);
                             ui.separator();
                             ui.add_space(4.0);
@@ -1354,6 +1460,14 @@ impl OverlayApp {
                         });
                     });
             });
+
+        if open_match_picker {
+            // Close settings first so the compact editor is the only
+            // interactive layer above a live match.
+            self.is_settings_open = false;
+            self.settings.save();
+            self.open_pick_editor(&live_state);
+        }
 
     }
 
@@ -1621,10 +1735,10 @@ impl OverlayApp {
         screen_h: f32,
     ) {
         let panel_h = (screen_h - 140.0).clamp(460.0, 720.0);
-        let using_manual_fallback = live_state.enemy_heroes.is_empty()
-            && !self.manual_enemy_heroes.is_empty();
+        let using_manual_fallback = self.manual_draft_override
+            || (live_state.enemy_heroes.is_empty() && !self.manual_enemy_heroes.is_empty());
         let draft_status = if using_manual_fallback {
-            format!("Ручные пики: {} · GSI All Pick не содержит врагов", enemies.len())
+            format!("Ручные пики: {} · правка игрока до конца матча", enemies.len())
         } else if enemies.is_empty() && !self.test_mode_enabled {
             "All Pick: GSI не отдаёт пики врага · добавить: Пики +".to_string()
         } else {
@@ -1766,6 +1880,12 @@ impl OverlayApp {
                             });
                             ui.add_space(3.0);
 
+                            if let Some(error) = &self.draft_analysis_error {
+                                ui.label(egui::RichText::new(error)
+                                    .size(9.0).color(egui::Color32::from_rgb(251, 146, 60)));
+                                ui.add_space(3.0);
+                            }
+
                             // Draft Weaknesses section
                             if !self.draft_weaknesses.is_empty() {
                                 render_badge(ui, "Enemy weaknesses", egui::Color32::from_rgb(248, 113, 113), 11.0);
@@ -1828,6 +1948,10 @@ impl OverlayApp {
         screen_w: f32,
         live_state: &LiveGameState,
     ) {
+        let is_live_match = matches!(
+            live_state.game_state.as_str(),
+            "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS" | "DOTA_GAMERULES_STATE_PRE_GAME"
+        );
         let picker_options = self.manual_picker_options();
         let mut add_pick: Option<(String, bool)> = None;
         let mut remove_enemy: Option<usize> = None;
@@ -1849,7 +1973,7 @@ impl OverlayApp {
                     .show(ui, |ui| {
                         ui.set_width(310.0);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Пики драфта")
+                            ui.label(egui::RichText::new(if is_live_match { "Пики текущей игры" } else { "Пики драфта" })
                                 .strong().size(12.5).color(egui::Color32::from_rgb(226, 232, 240)));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.button(egui::RichText::new("Закрыть").size(10.0)).clicked() {
@@ -1858,25 +1982,32 @@ impl OverlayApp {
                             });
                         });
                         ui.label(egui::RichText::new(
-                            if live_state.enemy_heroes.is_empty() {
+                            if is_live_match {
+                                "Игра идёт: исправления здесь сразу пересчитывают контр-советы и трекер ультимейтов."
+                            } else if live_state.enemy_heroes.is_empty() {
                                 "All Pick: F10 заменяет весь Vision-снимок; ниже можно исправить обе команды."
                             } else {
                                 "GSI уже прислал пики; ручные нужны только для исправления."
                             }
                         ).size(9.5).color(egui::Color32::from_rgb(203, 213, 225)));
                         ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            if ui.add_enabled(self.vision_rx.is_none(), egui::Button::new(
-                                egui::RichText::new("Vision scan [F10]").size(10.0)
-                            ).corner_radius(4)).clicked() {
-                                run_vision = true;
-                            }
-                            if self.vision_rx.is_some() {
-                                ui.spinner();
-                            }
-                            ui.label(egui::RichText::new(&self.vision_status).size(9.0)
-                                .color(egui::Color32::from_rgb(147, 197, 253)));
-                        });
+                        if is_live_match {
+                            ui.label(egui::RichText::new("Vision-снимок уже сохраняется автоматически в Strategy Time; в матче доступны только правки пиков.")
+                                .size(9.0).color(egui::Color32::from_rgb(148, 163, 184)));
+                        } else {
+                            ui.horizontal(|ui| {
+                                if ui.add_enabled(self.vision_rx.is_none(), egui::Button::new(
+                                    egui::RichText::new("Vision scan [F10]").size(10.0)
+                                ).corner_radius(4)).clicked() {
+                                    run_vision = true;
+                                }
+                                if self.vision_rx.is_some() {
+                                    ui.spinner();
+                                }
+                                ui.label(egui::RichText::new(&self.vision_status).size(9.0)
+                                    .color(egui::Color32::from_rgb(147, 197, 253)));
+                            });
+                        }
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Найти:").size(10.5));
                             ui.add_sized([185.0, 22.0], egui::TextEdit::singleline(&mut self.manual_enemy_search)
@@ -2003,13 +2134,16 @@ impl OverlayApp {
         if clear_picks {
             self.manual_enemy_heroes.clear();
             self.manual_ally_heroes.clear();
+            self.manual_draft_override = false;
             self.manual_enemy_search.clear();
             self.manual_ultimate_levels.clear();
             self.vision_candidates.clear();
         } else if let Some(index) = remove_enemy {
             self.manual_enemy_heroes.remove(index);
+            self.manual_draft_override = true;
         } else if let Some(index) = remove_ally {
             self.manual_ally_heroes.remove(index);
+            self.manual_draft_override = true;
         } else if let Some((hero_name, is_enemy)) = add_pick {
             let picks = if is_enemy {
                 &mut self.manual_enemy_heroes
@@ -2019,6 +2153,7 @@ impl OverlayApp {
             let can_add = picks.len() < 5 && !picks.iter().any(|name| name == &hero_name);
             if can_add {
                 picks.push(hero_name.clone());
+                self.manual_draft_override = true;
             }
             self.manual_enemy_search.clear();
         }
