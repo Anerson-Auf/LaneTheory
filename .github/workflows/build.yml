@@ -8,6 +8,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -26,17 +30,17 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-msvc
+
       - name: Run focused tests
         shell: pwsh
-        env:
-          CARGO_BUILD_JOBS: 6
-          RUST_TEST_THREADS: 6
-        run: cargo test --bin lanetheory -- --test-threads=6
+        run: cargo test --release --bin lanetheory
 
       - name: Build release binary
         shell: pwsh
-        env:
-          CARGO_BUILD_JOBS: 6
         run: cargo build --release --bin lanetheory
 
       - name: Prepare portable artifact

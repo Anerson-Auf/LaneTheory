@@ -51,8 +51,7 @@
 ## Разработка
 
 ```powershell
-$env:CARGO_BUILD_JOBS=6
 cargo build --release
 ```
 
-GitHub Actions собирает Windows-артефакт для каждого изменения в `main` и для тегов релиза.
+GitHub Actions собирает Windows-артефакт для каждого изменения в `main` и для тегов релиза. CI использует Rust-aware cache; число compile jobs не фиксируется и выбирается самим runner.

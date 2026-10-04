@@ -24,7 +24,6 @@ if not exist "%EXE_PATH%" (
 )
 
 echo [INFO] Сборка актуальной release-версии...
-set "CARGO_BUILD_JOBS=6"
 cargo build --release
 if %errorlevel% neq 0 (
     echo [ERROR] Сборка не удалась. Закройте старый overlay, если он ещё запущен.
