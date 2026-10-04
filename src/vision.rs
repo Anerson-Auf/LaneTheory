@@ -14,12 +14,14 @@ use std::path::{Path, PathBuf};
 const PORTRAIT_CACHE: &str = "cache/vision_portraits";
 const VARIANT_CACHE: &str = "cache/vision_variants";
 const PENDING_CACHE: &str = "cache/vision_pending";
-// Dota's top player cards are not a 120 px grid at 1920: the right bank has
-// a measured 122 px pitch. Keeping the coordinates explicit prevents a
-// growing leftward error on slots 2–5.
+// Dota's top player cards are not an even grid at 1920. These centres were
+// measured from the coloured top card borders on a live Strategy Time frame:
+// left bank 264/387/508/630/752 px, right bank 1159/1281/1406/1524/1649 px.
+// Keeping each coordinate explicit avoids the old accumulated leftward error
+// that reached ~9 px by allied slot five.
 const SLOT_CENTRES: [f32; 10] = [
-    0.139, 0.201, 0.263, 0.325, 0.387,
-    0.603, 0.6665, 0.7300, 0.7935, 0.8570,
+    0.1375, 0.2013, 0.2646, 0.3281, 0.3914,
+    0.6036, 0.6672, 0.7320, 0.7938, 0.8589,
 ];
 // The visible player-card artwork is ~75 px tall at a 1080 px client.  The
 // former 58 px crop cut off the lower part of every hero portrait.
