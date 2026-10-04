@@ -145,7 +145,7 @@ pub async fn scan_enemy_draft(
             empty_slots,
             uncertain,
             if debug_saved { " · debug: cache/vision_last_scan.png" } else { "" },
-            if pending_saved { " · можно обучить слоты вручную" } else { "" },
+            if pending_saved { " · карточки сохранены для проверки после игры" } else { "" },
         ),
         enemy_is_right,
         has_pending_slot_crops: pending_saved,
@@ -208,6 +208,17 @@ fn variant_dir(hero_name: &str) -> PathBuf {
 
 fn pending_slot_path(slot: usize) -> PathBuf {
     Path::new(PENDING_CACHE).join(format!("slot_{slot}.png"))
+}
+
+/// Returns the exact card crop captured by the latest explicit F10 scan.
+/// The overlay shows these images only in the post-game review, so training
+/// never asks the player to remember who occupied a draft slot.
+pub fn pending_slot_crop_bytes(slot: usize) -> Result<Vec<u8>, String> {
+    if slot >= 10 {
+        return Err("некорректный слот".into());
+    }
+    fs::read(pending_slot_path(slot))
+        .map_err(|error| format!("нет снимка слота {slot}; сначала нажми F10 ({error})"))
 }
 
 /// Promotes one card from the last explicit F10 capture into the local
