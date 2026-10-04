@@ -89,4 +89,4 @@ Workflow **Refresh LaneTheory data pack** запускается вручную 
 - Обновлён transport OpenDota item schema: ответ разбирается из raw body с `Accept-Encoding: identity`, а предыдущий кэш сохраняется при ошибке.
 - Добавлены устойчивые границы матча по `matchid`, очистка ручного драфта, новая сохранённая роль и match-local F5 override.
 - Vision получил pHash, shift-search, отсев пустых карточек, debug screenshot и supervised local variant cache с post-game подтверждением по реальным кропам.
-- Counter-pick анализ ограничен 12 секундами: недоступный публичный API больше не оставляет HUD в бесконечном loading-state и не влияет на Vision.
+- Counter-pick анализ делает до пяти matchup-запросов параллельно с лимитом 3 секунды на каждый и общим guard в 12 секунд: недоступный публичный API больше не оставляет HUD в бесконечном loading-state и не влияет на Vision.

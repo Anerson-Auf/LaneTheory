@@ -44,14 +44,17 @@ impl Advisor {
         // OpenDota's endpoint is indexed by the hero whose matchup table is being
         // requested.  The old implementation fetched that table for every possible
         // recommendation (~127 serial requests).  Invert the relation: fetch each
-        // selected enemy once (at most five requests), then score its opponents locally.
+        // selected enemy once (at most five bounded parallel requests), then score
+        // every returned table locally. A temporary API failure still preserves the
+        // valid cached/received part of the draft rather than blocking the HUD.
+        let matchup_tables = api.get_matchups_batch(&enemy_ids).await;
         let mut candidate_scores: std::collections::HashMap<u32, (f32, usize, usize, u32, Vec<String>)> =
             std::collections::HashMap::new();
         for enemy_id in &enemy_ids {
             let Some(enemy_hero) = api.heroes.get(enemy_id).cloned() else {
                 continue;
             };
-            for matchup in api.get_matchups(*enemy_id).await {
+            for matchup in matchup_tables.get(enemy_id).cloned().unwrap_or_default() {
                 if picked_ids.contains(&matchup.hero_id) || matchup.games_played == 0 {
                     continue;
                 }

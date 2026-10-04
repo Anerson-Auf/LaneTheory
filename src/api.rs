@@ -1,6 +1,6 @@
 use crate::models::{HeroData, HeroMatchup, ItemData, ItemPopularity};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 const CACHE_DIR: &str = "cache";
@@ -560,29 +560,57 @@ impl DotaApiClient {
         heroes.into_iter().take(7).map(|(id, name, wr, _)| (id, name, wr)).collect()
     }
 
-    pub async fn get_matchups(&mut self, hero_id: u32) -> Vec<HeroMatchup> {
-        if let Some(cached) = self.matchups_cache.get(&hero_id) {
-            return cached.clone();
-        }
+    /// Resolves the selected enemy tables concurrently. A five-hero Vision
+    /// snapshot must not turn into five serial network waits: memory and disk
+    /// cache win first, while every missing public request has its own short
+    /// deadline. A failed table simply yields a partial, still usable draft.
+    pub async fn get_matchups_batch(&mut self, hero_ids: &[u32]) -> HashMap<u32, Vec<HeroMatchup>> {
+        let mut resolved = HashMap::new();
+        let mut missing = Vec::new();
+        let mut seen = HashSet::new();
 
-        let cache_file = format!("{CACHE_DIR}/matchups/{hero_id}.json");
-        if let Ok(data) = fs::read_to_string(&cache_file) {
-            if let Ok(matchups) = serde_json::from_str::<Vec<HeroMatchup>>(&data) {
-                self.matchups_cache.insert(hero_id, matchups.clone());
-                return matchups;
+        for hero_id in hero_ids {
+            if !seen.insert(*hero_id) {
+                continue;
             }
+            if let Some(cached) = self.matchups_cache.get(hero_id) {
+                resolved.insert(*hero_id, cached.clone());
+                continue;
+            }
+            let cache_file = format!("{CACHE_DIR}/matchups/{hero_id}.json");
+            if let Ok(data) = fs::read_to_string(&cache_file)
+                && let Ok(matchups) = serde_json::from_str::<Vec<HeroMatchup>>(&data)
+            {
+                self.matchups_cache.insert(*hero_id, matchups.clone());
+                resolved.insert(*hero_id, matchups);
+                continue;
+            }
+            missing.push(*hero_id);
         }
 
-        let url = format!("https://api.opendota.com/api/heroes/{hero_id}/matchups");
-        if let Ok(resp) = self.client.get(&url).send().await {
-            if let Ok(matchups) = resp.json::<Vec<HeroMatchup>>().await {
+        let mut requests = tokio::task::JoinSet::new();
+        for hero_id in missing {
+            let client = self.client.clone();
+            requests.spawn(async move {
+                let url = format!("https://api.opendota.com/api/heroes/{hero_id}/matchups");
+                let matchups = tokio::time::timeout(std::time::Duration::from_secs(3), async move {
+                    let response = client.get(url).send().await.ok()?;
+                    response.json::<Vec<HeroMatchup>>().await.ok()
+                }).await.ok().flatten();
+                (hero_id, matchups)
+            });
+        }
+
+        while let Some(result) = requests.join_next().await {
+            if let Ok((hero_id, Some(matchups))) = result {
+                let cache_file = format!("{CACHE_DIR}/matchups/{hero_id}.json");
                 let _ = fs::write(&cache_file, serde_json::to_string(&matchups).unwrap_or_default());
                 self.matchups_cache.insert(hero_id, matchups.clone());
-                return matchups;
+                resolved.insert(hero_id, matchups);
             }
         }
 
-        Vec::new()
+        resolved
     }
 
     pub async fn get_item_popularity(&mut self, hero_id: u32) -> ItemPopularity {
