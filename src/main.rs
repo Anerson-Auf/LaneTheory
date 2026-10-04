@@ -71,7 +71,7 @@ fn install_gsi_config() {
         return;
     }
     match std::fs::create_dir_all(&cfg_dir).and_then(|_| std::fs::write(&target, GSI_CONFIG)) {
-        Ok(()) => println!("GSI cfg установлен/обновлён: {}. Полностью перезапусти Dota 2, чтобы игра прочитала cfg.", target.display()),
+        Ok(()) => println!("GSI cfg установлен/обновлён: {}. В Steam launch options добавь -gamestateintegration и полностью перезапусти Dota 2.", target.display()),
         Err(error) => eprintln!("Не удалось установить GSI cfg в {}: {error}", target.display()),
     }
 }
