@@ -4,6 +4,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 
 const CACHE_DIR: &str = "cache";
+const OPENDOTA_ITEM_SCHEMA_URL: &str = "https://api.opendota.com/api/constants/items";
+// OpenDota publishes the same generated constants here. This is a transport
+// fallback, not a second recommendation source: some VPN/proxy paths begin
+// the OpenDota response but never finish its large item document.
+const DOTACONSTANTS_ITEM_SCHEMA_URL: &str = "https://raw.githubusercontent.com/odota/dotaconstants/master/build/items.json";
 static EMBEDDED_HEROES_JSON: &str = include_str!("../cache/heroes.json");
 static EMBEDDED_ITEMS_JSON: &str = include_str!("../cache/items.json");
 // A last-known-good rank snapshot is shipped with the app.  Network data can
@@ -242,42 +247,29 @@ impl DotaApiClient {
         // looking valid forever. Query once per application start; cached and
         // embedded data still keep the overlay functional offline.
         println!("Проверка актуальности item schema из OpenDota...");
-        match self.client.get("https://api.opendota.com/api/constants/items")
-            // Some VPN/proxy paths serve a malformed compressed response for
-            // this endpoint.  Asking for identity avoids a decode failure and
-            // costs very little for an item schema requested once at startup.
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .timeout(std::time::Duration::from_secs(8))
-            .send().await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                let content_encoding = resp
-                    .headers()
-                    .get(reqwest::header::CONTENT_ENCODING)
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or("identity")
-                    .to_string();
-                match resp.bytes().await {
-                Ok(body) => match serde_json::from_slice::<HashMap<String, serde_json::Value>>(&body) {
-                Ok(raw_items) => {
-                    let item_list = Self::parse_item_schema(raw_items);
-                    if item_list.len() >= 300 {
-                        let _ = fs::write(&cache_file, serde_json::to_string(&item_list).unwrap_or_default());
-                        self.replace_items(item_list);
-                        println!("Item schema обновлён: {} предметов", self.items_by_id.len());
-                    } else {
-                        eprintln!("OpenDota вернул неполный item schema; оставляю кэш");
+        let (source, raw_items) = match self.fetch_item_schema(OPENDOTA_ITEM_SCHEMA_URL, true).await {
+            Ok(items) => ("OpenDota", Some(items)),
+            Err(primary_error) => {
+                eprintln!("OpenDota item schema недоступна ({primary_error}); пробую зеркало dotaconstants...");
+                match self.fetch_item_schema(DOTACONSTANTS_ITEM_SCHEMA_URL, false).await {
+                    Ok(items) => ("dotaconstants mirror", Some(items)),
+                    Err(fallback_error) => {
+                        eprintln!("Не удалось обновить item schema; оставляю кэш. OpenDota: {primary_error}; mirror: {fallback_error}");
+                        ("", None)
                     }
                 }
-                Err(error) => eprintln!("Не удалось разобрать item schema; оставляю кэш: {error}"),
-                },
-                Err(error) => eprintln!(
-                    "Не удалось прочитать item schema (Content-Encoding: {content_encoding}); оставляю кэш: {error}"
-                ),
             }
+        };
+
+        if let Some(raw_items) = raw_items {
+            let item_list = Self::parse_item_schema(raw_items);
+            if item_list.len() >= 300 {
+                let _ = fs::write(&cache_file, serde_json::to_string(&item_list).unwrap_or_default());
+                self.replace_items(item_list);
+                println!("Item schema обновлён из {source}: {} предметов", self.items_by_id.len());
+            } else {
+                eprintln!("{source} вернул неполный item schema; оставляю кэш");
             }
-            Ok(resp) => eprintln!("OpenDota item schema вернул HTTP {}; оставляю кэш", resp.status()),
-            Err(error) => eprintln!("Не удалось обновить item schema за 8с; работаю с кэшем: {error}"),
         }
 
         println!("Предметов загружено: {}", self.items_by_id.len());
@@ -290,6 +282,36 @@ impl DotaApiClient {
             self.items_by_name.insert(item.clean_name().to_string(), item.clone());
             self.items_by_id.insert(item.id, item);
         }
+    }
+
+    async fn fetch_item_schema(
+        &self,
+        url: &str,
+        request_identity_encoding: bool,
+    ) -> Result<HashMap<String, serde_json::Value>, String> {
+        let request = self.client.get(url)
+            .timeout(std::time::Duration::from_secs(12));
+        let request = if request_identity_encoding {
+            // Some proxy paths advertise broken compression specifically for
+            // api.opendota.com. Do not ask reqwest to decode that body.
+            request.header(reqwest::header::ACCEPT_ENCODING, "identity")
+        } else {
+            request
+        };
+        let response = request.send().await.map_err(|error| error.to_string())?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("HTTP {status}"));
+        }
+        let content_encoding = response.headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("identity")
+            .to_string();
+        let body = response.bytes().await
+            .map_err(|error| format!("Content-Encoding {content_encoding}: {error}"))?;
+        serde_json::from_slice::<HashMap<String, serde_json::Value>>(&body)
+            .map_err(|error| format!("JSON: {error}"))
     }
 
     fn parse_item_schema(raw_items: HashMap<String, serde_json::Value>) -> Vec<ItemData> {
