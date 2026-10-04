@@ -277,6 +277,12 @@ pub struct OverlayApp {
     vision_candidates: Vec<crate::vision::VisionCandidate>,
     vision_status: String,
     vision_capture_in_progress: bool,
+    /// A user-selected card from the last F10 capture. The next manual pick
+    /// labels this exact crop and promotes it to the local Vision library.
+    vision_learning_slot: Option<(usize, bool)>,
+    vision_enemy_is_right: bool,
+    vision_capture_available: bool,
+    vision_clear_confirmation: bool,
 
     // Builds recommendations
     last_hero_for_builds: String,
@@ -351,11 +357,12 @@ impl OverlayApp {
         let query = self.manual_enemy_search.trim().to_lowercase();
         let selected_enemy = &self.manual_enemy_heroes;
         let selected_ally = &self.manual_ally_heroes;
+        let is_labelling_vision_slot = self.vision_learning_slot.is_some();
         let mut heroes = self.api.try_lock().ok()
             .map(|api| api.heroes.values()
                 .filter(|hero| {
-                    !selected_enemy.iter().any(|name| name == &hero.name)
-                        && !selected_ally.iter().any(|name| name == &hero.name)
+                    (is_labelling_vision_slot || (!selected_enemy.iter().any(|name| name == &hero.name)
+                        && !selected_ally.iter().any(|name| name == &hero.name)))
                         && (query.is_empty()
                             || hero.localized_name.to_lowercase().contains(&query)
                             || hero.short_name().replace('_', " ").contains(&query))
@@ -437,6 +444,10 @@ impl OverlayApp {
             vision_candidates: Vec::new(),
             vision_status: "Vision: по кнопке, один кадр".to_string(),
             vision_capture_in_progress: false,
+            vision_learning_slot: None,
+            vision_enemy_is_right: true,
+            vision_capture_available: false,
+            vision_clear_confirmation: false,
 
             last_hero_for_builds: String::new(),
             is_loading_builds: false,
@@ -655,6 +666,9 @@ impl eframe::App for OverlayApp {
             self.vision_candidates.clear();
             self.vision_rx = None;
             self.vision_capture_in_progress = false;
+            self.vision_learning_slot = None;
+            self.vision_capture_available = false;
+            self.vision_clear_confirmation = false;
             self.vision_status = "Vision: по кнопке, один кадр".to_string();
         }
         self.previous_game_state = live_state.game_state.clone();
@@ -703,6 +717,9 @@ impl eframe::App for OverlayApp {
                 self.vision_capture_in_progress = false;
                 self.vision_status = result.status;
                 self.vision_candidates = result.candidates;
+                self.vision_enemy_is_right = result.enemy_is_right;
+                self.vision_learning_slot = None;
+                self.vision_capture_available = result.has_pending_slot_crops;
                 // F10 is a full snapshot, not an append action. Replacing the
                 // lists prevents stale early-draft heroes from surviving after
                 // all five slots have changed.
@@ -1765,8 +1782,9 @@ impl OverlayApp {
         live_state: &LiveGameState,
     ) {
         let picker_options = self.manual_picker_options();
-        let mut add_enemy: Option<String> = None;
-        let mut add_ally: Option<String> = None;
+        let mut add_pick: Option<(String, bool, Option<usize>)> = None;
+        let mut select_vision_slot: Option<(usize, bool)> = None;
+        let mut clear_vision_learning = false;
         let mut remove_enemy: Option<usize> = None;
         let mut remove_ally: Option<usize> = None;
         let mut clear_picks = false;
@@ -1814,6 +1832,40 @@ impl OverlayApp {
                             ui.label(egui::RichText::new(&self.vision_status).size(9.0)
                                 .color(egui::Color32::from_rgb(147, 197, 253)));
                         });
+                        let learning_slot = self.vision_learning_slot;
+                        if self.vision_capture_available {
+                            ui.add_space(3.0);
+                            ui.label(egui::RichText::new("Обучить Vision: выбери карточку, затем её настоящего героя ниже.")
+                                .size(9.3).color(egui::Color32::from_rgb(167, 139, 250)));
+                            ui.horizontal_wrapped(|ui| {
+                                for slot in 0..10 {
+                                    let is_enemy = if self.vision_enemy_is_right { slot >= 5 } else { slot < 5 };
+                                    let side = if is_enemy { "В" } else { "С" };
+                                    let selected = learning_slot == Some((slot, is_enemy));
+                                    if ui.add(egui::Button::new(egui::RichText::new(format!("{side}{}", slot % 5 + 1)).size(9.0))
+                                        .fill(if selected { egui::Color32::from_rgb(91, 33, 182) } else { egui::Color32::TRANSPARENT })
+                                        .corner_radius(4))
+                                        .on_hover_text(format!("Подписать карточку {side}{} из последнего F10-снимка", slot % 5 + 1))
+                                        .clicked()
+                                    {
+                                        select_vision_slot = Some((slot, is_enemy));
+                                    }
+                                }
+                            });
+                            if let Some((slot, is_enemy)) = learning_slot {
+                                let side = if is_enemy { "врага" } else { "союзника" };
+                                ui.label(egui::RichText::new(format!("Подтверждение: найди настоящего {side} для слота {} и нажми «Запомнить».", slot % 5 + 1))
+                                    .size(9.2).color(egui::Color32::from_rgb(216, 180, 254)));
+                            }
+                            if self.vision_clear_confirmation {
+                                if ui.add(egui::Button::new(egui::RichText::new("Точно удалить обучение").size(9.0))
+                                    .fill(egui::Color32::from_rgb(127, 29, 29)).corner_radius(4)).clicked() {
+                                    clear_vision_learning = true;
+                                }
+                            } else if ui.button(egui::RichText::new("Сбросить обучение").size(9.0)).clicked() {
+                                self.vision_clear_confirmation = true;
+                            }
+                        }
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Найти:").size(10.5));
                             ui.add_sized([185.0, 22.0], egui::TextEdit::singleline(&mut self.manual_enemy_search)
@@ -1834,15 +1886,24 @@ impl OverlayApp {
                             ui.horizontal_wrapped(|ui| {
                                 for hero in &picker_options {
                                     ui.label(egui::RichText::new(&hero.localized_name).size(10.0));
-                                    if ui.add_enabled(self.manual_enemy_heroes.len() < 5,
-                                        egui::Button::new(egui::RichText::new("В+").size(9.0)).corner_radius(4)
-                                    ).on_hover_text("Добавить как врага").clicked() {
-                                        add_enemy = Some(hero.name.clone());
-                                    }
-                                    if ui.add_enabled(self.manual_ally_heroes.len() < 5,
-                                        egui::Button::new(egui::RichText::new("С+").size(9.0)).corner_radius(4)
-                                    ).on_hover_text("Добавить как союзника").clicked() {
-                                        add_ally = Some(hero.name.clone());
+                                    if let Some((slot, is_enemy)) = learning_slot {
+                                        let at_capacity = if is_enemy { self.manual_enemy_heroes.len() >= 5 } else { self.manual_ally_heroes.len() >= 5 };
+                                        if ui.add_enabled(!at_capacity,
+                                            egui::Button::new(egui::RichText::new("Запомнить").size(9.0)).corner_radius(4)
+                                        ).on_hover_text(format!("Сохранить этот образ для слота {}", slot % 5 + 1)).clicked() {
+                                            add_pick = Some((hero.name.clone(), is_enemy, Some(slot)));
+                                        }
+                                    } else {
+                                        if ui.add_enabled(self.manual_enemy_heroes.len() < 5,
+                                            egui::Button::new(egui::RichText::new("В+").size(9.0)).corner_radius(4)
+                                        ).on_hover_text("Добавить как врага").clicked() {
+                                            add_pick = Some((hero.name.clone(), true, None));
+                                        }
+                                        if ui.add_enabled(self.manual_ally_heroes.len() < 5,
+                                            egui::Button::new(egui::RichText::new("С+").size(9.0)).corner_radius(4)
+                                        ).on_hover_text("Добавить как союзника").clicked() {
+                                            add_pick = Some((hero.name.clone(), false, None));
+                                        }
                                     }
                                 }
                             });
@@ -1899,8 +1960,7 @@ impl OverlayApp {
                                         candidate.distance,
                                         candidate.margin
                                     )).clicked() {
-                                        if candidate.is_enemy { add_enemy = Some(candidate.hero_name.clone()); }
-                                        else { add_ally = Some(candidate.hero_name.clone()); }
+                                        add_pick = Some((candidate.hero_name.clone(), candidate.is_enemy, None));
                                     }
                                 }
                             });
@@ -1944,25 +2004,48 @@ impl OverlayApp {
             self.manual_enemy_search.clear();
             self.manual_ultimate_levels.clear();
             self.vision_candidates.clear();
+            self.vision_learning_slot = None;
+            self.vision_clear_confirmation = false;
         } else if let Some(index) = remove_enemy {
             self.manual_enemy_heroes.remove(index);
         } else if let Some(index) = remove_ally {
             self.manual_ally_heroes.remove(index);
-        } else if let Some(hero_name) = add_enemy {
-            if self.manual_enemy_heroes.len() < 5
-                && !self.manual_enemy_heroes.iter().any(|name| name == &hero_name)
-            {
-                self.manual_enemy_heroes.push(hero_name);
-                self.manual_enemy_search.clear();
+        } else if let Some((hero_name, is_enemy, learning_slot)) = add_pick {
+            let picks = if is_enemy {
+                &mut self.manual_enemy_heroes
+            } else {
+                &mut self.manual_ally_heroes
+            };
+            let can_add = picks.len() < 5 && !picks.iter().any(|name| name == &hero_name);
+            if can_add {
+                picks.push(hero_name.clone());
             }
-        } else if let Some(hero_name) = add_ally {
-            if self.manual_ally_heroes.len() < 5
-                && !self.manual_ally_heroes.iter().any(|name| name == &hero_name)
-                && !self.manual_enemy_heroes.iter().any(|name| name == &hero_name)
-            {
-                self.manual_ally_heroes.push(hero_name);
-                self.manual_enemy_search.clear();
+            if let Some(slot) = learning_slot {
+                match crate::vision::save_verified_slot_variant(slot, &hero_name) {
+                    Ok(()) => {
+                        self.vision_status = format!(
+                            "Vision: слот {} сохранён для {} · следующий F10 учтёт образ",
+                            slot % 5 + 1,
+                            hero_name.strip_prefix("npc_dota_hero_").unwrap_or(&hero_name).replace('_', " "),
+                        );
+                    }
+                    Err(error) => {
+                        self.vision_status = format!("Vision: не удалось сохранить образ ({error})");
+                    }
+                }
+                self.vision_learning_slot = None;
             }
+            self.manual_enemy_search.clear();
+        } else if let Some(slot) = select_vision_slot {
+            self.vision_learning_slot = Some(slot);
+        }
+        if clear_vision_learning {
+            match crate::vision::clear_verified_variants() {
+                Ok(()) => self.vision_status = "Vision: локальное обучение сброшено".to_string(),
+                Err(error) => self.vision_status = format!("Vision: не удалось сбросить обучение ({error})"),
+            }
+            self.vision_learning_slot = None;
+            self.vision_clear_confirmation = false;
         }
         if let Some((key, tier)) = set_ultimate_tier {
             self.manual_ultimate_levels.insert(key.clone(), tier);

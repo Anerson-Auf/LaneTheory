@@ -12,6 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const PORTRAIT_CACHE: &str = "cache/vision_portraits";
+const VARIANT_CACHE: &str = "cache/vision_variants";
+const PENDING_CACHE: &str = "cache/vision_pending";
 // Dota's top player cards are not a 120 px grid at 1920: the right bank has
 // a measured 122 px pitch. Keeping the coordinates explicit prevents a
 // growing leftward error on slots 2–5.
@@ -54,6 +56,8 @@ pub struct VisionResult {
     pub auto_accepted_enemies: Vec<String>,
     pub auto_accepted_allies: Vec<String>,
     pub status: String,
+    pub enemy_is_right: bool,
+    pub has_pending_slot_crops: bool,
 }
 
 #[derive(Clone)]
@@ -75,20 +79,20 @@ pub async fn scan_enemy_draft(
     enemy_is_right: bool,
 ) -> VisionResult {
     if heroes.is_empty() {
-        return VisionResult { candidates: Vec::new(), auto_accepted_enemies: Vec::new(), auto_accepted_allies: Vec::new(), status: "Vision: каталог героев ещё загружается".into() };
+        return VisionResult { candidates: Vec::new(), auto_accepted_enemies: Vec::new(), auto_accepted_allies: Vec::new(), status: "Vision: каталог героев ещё загружается".into(), enemy_is_right, has_pending_slot_crops: false };
     }
 
     if let Err(error) = ensure_portraits(&heroes).await {
-        return VisionResult { candidates: Vec::new(), auto_accepted_enemies: Vec::new(), auto_accepted_allies: Vec::new(), status: format!("Vision: не подготовлены портреты ({error})") };
+        return VisionResult { candidates: Vec::new(), auto_accepted_enemies: Vec::new(), auto_accepted_allies: Vec::new(), status: format!("Vision: не подготовлены портреты ({error})"), enemy_is_right, has_pending_slot_crops: false };
     }
     let templates = load_templates(&heroes);
     if templates.len() < 100 {
-        return VisionResult { candidates: Vec::new(), auto_accepted_enemies: Vec::new(), auto_accepted_allies: Vec::new(), status: "Vision: кэш портретов неполный; повтори scan после загрузки".into() };
+        return VisionResult { candidates: Vec::new(), auto_accepted_enemies: Vec::new(), auto_accepted_allies: Vec::new(), status: "Vision: кэш портретов неполный; повтори scan после загрузки".into(), enemy_is_right, has_pending_slot_crops: false };
     }
 
     let frame = match capture_dota_client() {
         Ok(frame) => frame,
-        Err(error) => return VisionResult { candidates: Vec::new(), auto_accepted_enemies: Vec::new(), auto_accepted_allies: Vec::new(), status: format!("Vision: не удалось снять кадр Dota ({error})") },
+        Err(error) => return VisionResult { candidates: Vec::new(), auto_accepted_enemies: Vec::new(), auto_accepted_allies: Vec::new(), status: format!("Vision: не удалось снять кадр Dota ({error})"), enemy_is_right, has_pending_slot_crops: false },
     };
 
     let mut candidates = Vec::new();
@@ -129,18 +133,22 @@ pub async fn scan_enemy_draft(
     // even after a successful match makes calibration inspectable; previously
     // a successful scan left an older, misleading debug image on disk.
     let debug_saved = save_debug_frame(&frame).is_ok();
+    let pending_saved = save_pending_slot_crops(&frame).is_ok();
     VisionResult {
         candidates,
         auto_accepted_enemies,
         auto_accepted_allies,
         status: format!(
-            "Vision: враги {}, союзники {}, пустых {}, проверить {} · враги {side}{}",
+            "Vision: враги {}, союзники {}, пустых {}, проверить {} · враги {side}{}{}",
             accepted_enemies_count,
             accepted_allies_count,
             empty_slots,
             uncertain,
             if debug_saved { " · debug: cache/vision_last_scan.png" } else { "" },
+            if pending_saved { " · можно обучить слоты вручную" } else { "" },
         ),
+        enemy_is_right,
+        has_pending_slot_crops: pending_saved,
     }
 }
 
@@ -187,15 +195,80 @@ fn portrait_path(hero_name: &str) -> PathBuf {
     Path::new(PORTRAIT_CACHE).join(format!("{clean}.png"))
 }
 
+fn hero_cache_key(hero_name: &str) -> String {
+    hero_name.strip_prefix("npc_dota_hero_").unwrap_or(hero_name)
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .collect()
+}
+
+fn variant_dir(hero_name: &str) -> PathBuf {
+    Path::new(VARIANT_CACHE).join(hero_cache_key(hero_name))
+}
+
+fn pending_slot_path(slot: usize) -> PathBuf {
+    Path::new(PENDING_CACHE).join(format!("slot_{slot}.png"))
+}
+
+/// Promotes one card from the last explicit F10 capture into the local
+/// many-to-one portrait library. This API is intentionally called only after
+/// the user has selected the hero in the manual picker; recognizer guesses
+/// must never train the recognizer.
+pub fn save_verified_slot_variant(slot: usize, hero_name: &str) -> Result<(), String> {
+    if slot >= 10 || hero_cache_key(hero_name).is_empty() {
+        return Err("некорректный слот или герой".into());
+    }
+    let source = pending_slot_path(slot);
+    let image = image::open(&source)
+        .map_err(|error| format!("нет снимка слота {slot}; сначала нажми F10 ({error})"))?;
+    let destination_dir = variant_dir(hero_name);
+    fs::create_dir_all(&destination_dir).map_err(|error| error.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let destination = destination_dir.join(format!("{stamp}_slot_{slot}.png"));
+    image.save(&destination).map_err(|error| error.to_string())
+}
+
+/// Removes only user-confirmed local variants; downloaded base portraits and
+/// the latest pending F10 crop remain intact. This is the recovery path for a
+/// mistakenly labelled card.
+pub fn clear_verified_variants() -> Result<(), String> {
+    let path = Path::new(VARIANT_CACHE);
+    if path.exists() {
+        fs::remove_dir_all(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn load_templates(heroes: &[HeroData]) -> Vec<PortraitTemplate> {
-    heroes.iter().filter_map(|hero| {
+    let mut templates = heroes.iter().filter_map(|hero| {
         let image = image::open(portrait_path(&hero.name)).ok()?;
         Some(PortraitTemplate {
             hero_name: hero.name.clone(),
             localized_name: hero.localized_name.clone(),
             hash: portrait_hash(&image)?,
         })
-    }).collect()
+    }).collect::<Vec<_>>();
+
+    // Local variants are deliberately separate from downloaded artwork. They
+    // are a card crop the player explicitly labelled, so a persona/arcana or
+    // HUD-specific appearance maps back to the same canonical hero name.
+    for hero in heroes {
+        let Ok(entries) = fs::read_dir(variant_dir(&hero.name)) else { continue; };
+        for entry in entries.flatten() {
+            let Ok(image) = image::open(entry.path()) else { continue; };
+            if let Some(hash) = card_hash(&image) {
+                templates.push(PortraitTemplate {
+                    hero_name: hero.name.clone(),
+                    localized_name: hero.localized_name.clone(),
+                    hash,
+                });
+            }
+        }
+    }
+    templates
 }
 
 fn portrait_hash(image: &DynamicImage) -> Option<u64> {
@@ -220,6 +293,17 @@ fn portrait_hash(image: &DynamicImage) -> Option<u64> {
     let offset_y = (height - crop_height) / 2;
     perceptual_hash(crop_width, crop_height, |x, y| {
         let pixel = rgba.get_pixel(offset_x + x, offset_y + y).0;
+        [pixel[0], pixel[1], pixel[2]]
+    })
+}
+
+/// A verified local variant is already the exact player-card crop. Do not
+/// centre-crop it again as if it were Steam's 16:9 source artwork.
+fn card_hash(image: &DynamicImage) -> Option<u64> {
+    let (width, height) = image.dimensions();
+    let rgba = image.to_rgba8();
+    perceptual_hash(width, height, |x, y| {
+        let pixel = rgba.get_pixel(x, y).0;
         [pixel[0], pixel[1], pixel[2]]
     })
 }
@@ -258,6 +342,35 @@ fn slot_hashes(frame: &DesktopFrame, slot: usize) -> Option<SlotHashes> {
         }
     }
     Some(SlotHashes { hashes, luma_stddev })
+}
+
+fn slot_rect(frame: &DesktopFrame, slot: usize) -> Option<(u32, u32, u32, u32)> {
+    let centre_x = *SLOT_CENTRES.get(slot)?;
+    let width = (frame.width as f32 * 0.054) as u32;
+    let height = (frame.height as f32 * TOP_CARD_ART_HEIGHT) as u32;
+    let left = ((frame.width as f32 * centre_x) as i32 - width as i32 / 2).max(0) as u32;
+    (width < frame.width && height < frame.height && width >= 16 && height >= 16)
+        .then_some((left, 0, width, height))
+}
+
+fn save_pending_slot_crops(frame: &DesktopFrame) -> Result<(), String> {
+    fs::create_dir_all(PENDING_CACHE).map_err(|error| error.to_string())?;
+    for slot in 0..10 {
+        let Some((left, top, width, height)) = slot_rect(frame, slot) else { continue; };
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for y in top..top + height {
+            for x in left..left + width {
+                let index = ((y * frame.width + x) * 4) as usize;
+                rgba.extend_from_slice(&[
+                    frame.pixels[index + 2], frame.pixels[index + 1], frame.pixels[index], 255,
+                ]);
+            }
+        }
+        let image = image::RgbaImage::from_raw(width, height, rgba)
+            .ok_or_else(|| format!("не удалось сохранить слот {slot}"))?;
+        image.save(pending_slot_path(slot)).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 /// Standard deviation over the interior of a slot. The two-pixel card frame
