@@ -341,8 +341,9 @@ pub struct PlayerProfile {
     pub dominant_position: Option<PlayerPosition>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PlayerPosition {
+    #[default]
     Pos1Carry,
     Pos2Mid,
     Pos3Offlane,
@@ -482,6 +483,11 @@ pub struct OverlaySettings {
     pub selected_rank: RankBracket,
     pub build_source: BuildSource,
 
+    // --- Match setup ---
+    /// Saved position applied at the start of every new match. F5 is only a
+    /// per-match override, so an old switch never leaks into the next queue.
+    pub preferred_position: PlayerPosition,
+
     // --- UI elements ---
     pub show_top_bar: bool,
     pub show_top_timers: bool,
@@ -515,6 +521,7 @@ impl Default for OverlaySettings {
             enable_rank_filter: true,
             selected_rank: RankBracket::All,
             build_source: BuildSource::OpenDotaAggregate,
+            preferred_position: PlayerPosition::Pos1Carry,
 
             show_top_bar: true,
             show_top_timers: true,
@@ -576,5 +583,14 @@ mod tests {
         assert!(state.enemy_heroes.is_empty());
         assert!(state.my_items.is_empty());
         assert!(state.tracked_spells.is_empty());
+    }
+
+    #[test]
+    fn old_settings_file_uses_carry_as_saved_preferred_position() {
+        let settings: OverlaySettings = serde_json::from_str("{\"enable_tts\": true}")
+            .expect("settings from a previous version should remain readable");
+
+        assert_eq!(settings.preferred_position, PlayerPosition::Pos1Carry);
+        assert!(settings.enable_tts);
     }
 }

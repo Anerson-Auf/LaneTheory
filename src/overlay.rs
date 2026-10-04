@@ -477,7 +477,7 @@ impl OverlayApp {
             // VK_F5 = 0x74 (Cycle active position: 1 -> 2 -> 3 -> 4 -> 5)
             let f5_down = (GetAsyncKeyState(0x74) as u16 & 0x8000) != 0;
             if f5_hotkey || (f5_down && !self.prev_f5_down) {
-                let cur = self.manual_position.unwrap_or(PlayerPosition::Pos1Carry);
+                let cur = self.manual_position.unwrap_or(self.settings.preferred_position);
                 self.manual_position = Some(cur.next());
             }
             self.prev_f5_down = f5_down;
@@ -648,6 +648,9 @@ impl eframe::App for OverlayApp {
             self.manual_ally_heroes.clear();
             self.manual_enemy_search.clear();
             self.manual_ultimate_levels.clear();
+            // F5 is deliberately a match-local override. A fresh match starts
+            // from the saved pre-queue position selected in Settings.
+            self.manual_position = None;
             self.draft_picker_open = false;
             self.vision_candidates.clear();
             self.vision_rx = None;
@@ -881,18 +884,11 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        // Determine Player Position:
-        let effective_position = if let Some(manual) = self.manual_position {
-            manual
-        } else if let Some(hname) = &live_state.my_hero_name {
-            self.api.try_lock().ok()
-                .and_then(|api| api.find_hero(hname).map(Advisor::infer_primary_position))
-                .unwrap_or(PlayerPosition::Pos1Carry)
-        } else if let Some(profile) = &live_state.player_profile {
-            profile.dominant_position.unwrap_or(PlayerPosition::Pos1Carry)
-        } else {
-            PlayerPosition::Pos1Carry
-        };
+        // Position must come from the queue selection, not from a hero's most
+        // popular role or an old player profile. Those guesses caused support
+        // builds to appear in mid and carried across games. F5 may override
+        // the saved pre-queue position for the current match only.
+        let effective_position = self.manual_position.unwrap_or(self.settings.preferred_position);
 
         if self.settings.build_source == crate::models::BuildSource::Dota2ProTracker {
             if D2PT_LINK_REQUESTED.swap(false, Ordering::Relaxed) {
@@ -1130,6 +1126,50 @@ impl OverlayApp {
                                 }
 
                             }
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+
+                            ui.label(
+                                egui::RichText::new("Роль перед поиском")
+                                    .color(egui::Color32::from_rgb(96, 165, 250))
+                                    .strong()
+                                    .size(12.0),
+                            );
+                            ui.add_space(3.0);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Роль Ranked Roles:").size(11.0).color(egui::Color32::from_rgb(203, 213, 225)));
+                                egui::ComboBox::from_id_salt("preferred_position_selector")
+                                    .selected_text(self.settings.preferred_position.title_ru())
+                                    .show_ui(ui, |ui| {
+                                        for position in [
+                                            PlayerPosition::Pos1Carry,
+                                            PlayerPosition::Pos2Mid,
+                                            PlayerPosition::Pos3Offlane,
+                                            PlayerPosition::Pos4SoftSupport,
+                                            PlayerPosition::Pos5HardSupport,
+                                        ] {
+                                            if ui.selectable_value(
+                                                &mut self.settings.preferred_position,
+                                                position,
+                                                position.title_ru(),
+                                            ).changed() {
+                                                // Selecting a role in Settings is an explicit
+                                                // request to make it active now as well.
+                                                self.manual_position = None;
+                                                self.settings.save();
+                                                self.last_enemy_signature.clear();
+                                                self.last_hero_for_builds.clear();
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.label(
+                                egui::RichText::new("Применяется автоматически при новой игре. F5 временно меняет роль только до конца текущего матча.")
+                                    .size(9.5)
+                                    .color(egui::Color32::from_rgb(148, 163, 184)),
+                            );
 
                             ui.add_space(8.0);
                             ui.separator();
