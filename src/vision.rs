@@ -29,6 +29,10 @@ const MAX_HAMMING_DISTANCE: u32 = 19; // round(0.30 * 64)
 const MIN_HAMMING_MARGIN: u32 = 3; // round(0.05 * 64)
 const SHIFT_FRACTION: f32 = 0.03;
 const SHIFT_STEPS: i32 = 2;
+// A black/unpicked card has no usable DCT signature. Hashing it produces an
+// arbitrary 64-bit pattern and therefore a random hero. Measure the central
+// artwork area first and keep such slots empty instead of guessing.
+const EMPTY_SLOT_MAX_LUMA_STDDEV: f32 = 8.0;
 
 #[derive(Debug, Clone)]
 pub struct VisionCandidate {
@@ -59,6 +63,11 @@ struct PortraitTemplate {
     hash: u64,
 }
 
+struct SlotHashes {
+    hashes: Vec<u64>,
+    luma_stddev: f32,
+}
+
 /// Capture exactly one frame and classify the five portrait slots of the enemy
 /// bank. `enemy_is_right` is obtained from the player's GSI team field.
 pub async fn scan_enemy_draft(
@@ -83,14 +92,19 @@ pub async fn scan_enemy_draft(
     };
 
     let mut candidates = Vec::new();
+    let mut empty_slots = 0usize;
     let enemy_slots = if enemy_is_right { [5, 6, 7, 8, 9] } else { [0, 1, 2, 3, 4] };
     let ally_slots = if enemy_is_right { [0, 1, 2, 3, 4] } else { [5, 6, 7, 8, 9] };
     for (is_enemy, slots) in [(true, enemy_slots), (false, ally_slots)] {
         for slot in slots {
-            let Some(query_hashes) = slot_hashes(&frame, slot) else {
+            let Some(query) = slot_hashes(&frame, slot) else {
                 continue;
             };
-            if let Some((template, distance, margin)) = best_match(&query_hashes, &templates) {
+            if query.luma_stddev <= EMPTY_SLOT_MAX_LUMA_STDDEV {
+                empty_slots += 1;
+                continue;
+            }
+            if let Some((template, distance, margin)) = best_match(&query.hashes, &templates) {
                 candidates.push(VisionCandidate {
                     hero_name: template.hero_name.clone(),
                     localized_name: template.localized_name.clone(),
@@ -107,7 +121,9 @@ pub async fn scan_enemy_draft(
     let accepted_enemies_count = auto_accepted_enemies.len();
     let accepted_allies_count = auto_accepted_allies.len();
     let accepted_count = accepted_enemies_count + accepted_allies_count;
-    let uncertain = candidates.len().saturating_sub(accepted_count);
+    let uncertain = 10usize
+        .saturating_sub(empty_slots)
+        .saturating_sub(accepted_count);
     let side = if enemy_is_right { "справа" } else { "слева" };
     // Exactly one file, overwritten only by an explicit F10 scan. Keeping it
     // even after a successful match makes calibration inspectable; previously
@@ -118,9 +134,10 @@ pub async fn scan_enemy_draft(
         auto_accepted_enemies,
         auto_accepted_allies,
         status: format!(
-            "Vision: враги {}, союзники {}, проверить {} · враги {side}{}",
+            "Vision: враги {}, союзники {}, пустых {}, проверить {} · враги {side}{}",
             accepted_enemies_count,
             accepted_allies_count,
+            empty_slots,
             uncertain,
             if debug_saved { " · debug: cache/vision_last_scan.png" } else { "" },
         ),
@@ -214,7 +231,7 @@ struct DesktopFrame {
     pixels: Vec<u8>,
 }
 
-fn slot_hashes(frame: &DesktopFrame, slot: usize) -> Option<Vec<u64>> {
+fn slot_hashes(frame: &DesktopFrame, slot: usize) -> Option<SlotHashes> {
     // Hero portrait centres in Dota's draft HUD, normalized to the Dota client.
     // The crop is deliberately inset to ignore card borders and player names.
     // Values are normalized to Dota's client area, not desktop resolution.
@@ -226,6 +243,7 @@ fn slot_hashes(frame: &DesktopFrame, slot: usize) -> Option<Vec<u64>> {
     if crop_w >= frame.width || crop_h >= frame.height || crop_w < 16 || crop_h < 16 {
         return None;
     }
+    let luma_stddev = crop_luma_stddev(frame, x as u32, y as u32, crop_w, crop_h);
     let mut hashes = Vec::with_capacity(((SHIFT_STEPS * 2 + 1).pow(2)) as usize);
     for dy in -SHIFT_STEPS..=SHIFT_STEPS {
         for dx in -SHIFT_STEPS..=SHIFT_STEPS {
@@ -239,7 +257,40 @@ fn slot_hashes(frame: &DesktopFrame, slot: usize) -> Option<Vec<u64>> {
             })?);
         }
     }
-    Some(hashes)
+    Some(SlotHashes { hashes, luma_stddev })
+}
+
+/// Standard deviation over the interior of a slot. The two-pixel card frame
+/// is intentionally excluded: an empty card can have a coloured frame while
+/// its artwork area remains practically flat.
+fn crop_luma_stddev(frame: &DesktopFrame, left: u32, top: u32, width: u32, height: u32) -> f32 {
+    let inset_x = (width / 10).max(1);
+    let inset_y = (height / 10).max(1);
+    let start_x = (left + inset_x).min(frame.width);
+    let start_y = (top + inset_y).min(frame.height);
+    let end_x = left.saturating_add(width).saturating_sub(inset_x).min(frame.width);
+    let end_y = top.saturating_add(height).saturating_sub(inset_y).min(frame.height);
+    if start_x >= end_x || start_y >= end_y {
+        return f32::INFINITY;
+    }
+
+    let mut count = 0_f64;
+    let mut sum = 0_f64;
+    let mut sum_squares = 0_f64;
+    for y in start_y..end_y {
+        for x in start_x..end_x {
+            let index = ((y * frame.width + x) * 4) as usize;
+            let blue = frame.pixels[index] as f64;
+            let green = frame.pixels[index + 1] as f64;
+            let red = frame.pixels[index + 2] as f64;
+            let luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+            count += 1.0;
+            sum += luma;
+            sum_squares += luma * luma;
+        }
+    }
+    let mean = sum / count;
+    ((sum_squares / count - mean * mean).max(0.0) as f32).sqrt()
 }
 
 /// One overwrite-only debug artifact for UI-scale calibration. It is written
@@ -520,5 +571,22 @@ mod tests {
         let inverse = image(true);
         assert_eq!((first ^ same).count_ones(), 0);
         assert!((first ^ inverse).count_ones() > 3);
+    }
+
+    #[test]
+    fn empty_card_interior_is_not_sent_to_the_hero_matcher() {
+        let frame = DesktopFrame {
+            width: 20,
+            height: 20,
+            pixels: vec![14; 20 * 20 * 4],
+        };
+        assert!(crop_luma_stddev(&frame, 0, 0, 20, 20) <= EMPTY_SLOT_MAX_LUMA_STDDEV);
+
+        let mut artwork = frame.pixels.clone();
+        for (index, pixel) in artwork.iter_mut().enumerate().step_by(7) {
+            *pixel = (index % 255) as u8;
+        }
+        let artwork = DesktopFrame { width: 20, height: 20, pixels: artwork };
+        assert!(crop_luma_stddev(&artwork, 0, 0, 20, 20) > EMPTY_SLOT_MAX_LUMA_STDDEV);
     }
 }
