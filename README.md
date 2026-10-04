@@ -54,4 +54,6 @@
 cargo build --release
 ```
 
-GitHub Actions собирает Windows-артефакт для каждого изменения в `main` и для тегов релиза. CI использует Rust-aware cache; число compile jobs не фиксируется и выбирается самим runner.
+GitHub Actions собирает Windows-артефакт для каждого изменения в `main` и для тегов релиза. CI использует Rust-aware cache; число compile jobs не фиксируется и выбирается самим runner. Артефакт содержит `LaneTheory.exe` и проверенный `LaneTheory.ypk` рядом с ним.
+
+Workflow **Refresh LaneTheory data pack** запускается вручную в GitHub Actions или по понедельникам. Он загружает публичные данные заново, отвергает неполный pack и публикует `LaneTheory-data-pack` как отдельный artifact. Локальный `.ypk` пользователя не отправляется в GitHub: это исключает публикацию его кэша и настроек.

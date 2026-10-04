@@ -164,6 +164,17 @@ impl DotaApiClient {
         }
     }
 
+    /// A CI data refresh must fail closed when a public source did not
+    /// provide the patch-sensitive datasets. The ordinary overlay remains
+    /// intentionally usable with its embedded fallback instead.
+    pub fn has_publishable_data_pack(&self) -> bool {
+        self.heroes.len() >= 100
+            && self.items_by_id.len() >= 300
+            && self.bracket_winrates.len() >= 100
+            && self.abilities.len() >= 1_000
+            && self.hero_ultimate_abilities.len() >= 100
+    }
+
     async fn load_or_fetch_heroes(&mut self) {
         let cache_file = format!("{CACHE_DIR}/heroes.json");
 

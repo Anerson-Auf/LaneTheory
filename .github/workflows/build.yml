@@ -43,11 +43,16 @@ jobs:
         shell: pwsh
         run: cargo build --release --bin lanetheory
 
+      - name: Build validated offline data pack
+        shell: pwsh
+        run: target/release/lanetheory.exe --refresh-data-pack
+
       - name: Prepare portable artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/lanetheory.exe dist/LaneTheory.exe
+          Copy-Item target/release/LaneTheory.ypk dist/LaneTheory.ypk
           Copy-Item run.bat dist/run.bat
           Copy-Item README.md dist/README.md
 

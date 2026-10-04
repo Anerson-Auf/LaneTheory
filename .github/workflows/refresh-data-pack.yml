@@ -1,0 +1,49 @@
+name: Refresh LaneTheory data pack
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+
+concurrency:
+  group: lanetheory-data-pack
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    name: Refresh public data snapshot
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-msvc
+
+      - name: Build pack generator
+        shell: pwsh
+        run: cargo build --release --bin lanetheory
+
+      - name: Fetch and validate current public data
+        shell: pwsh
+        run: target/release/lanetheory.exe --refresh-data-pack
+
+      - name: Publish data-pack artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LaneTheory-data-pack
+          path: target/release/LaneTheory.ypk
+          if-no-files-found: error
+          retention-days: 90

@@ -12,6 +12,31 @@ use std::sync::{Arc, Mutex};
 
 const GSI_CONFIG: &str = include_str!("../gamestate_integration_lanetheory.cfg");
 
+fn refresh_data_pack_if_requested() -> bool {
+    if !std::env::args().any(|argument| argument == "--refresh-data-pack") {
+        return false;
+    }
+
+    println!("Формирую publishable LaneTheory.ypk без запуска overlay...");
+    let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    let api = runtime.block_on(api::DotaApiClient::new());
+    if api.has_publishable_data_pack() {
+        println!("YPK готов для публикации.");
+        std::process::exit(0);
+    }
+
+    eprintln!(
+        "YPK не опубликован: один из patch-sensitive наборов не загрузился \
+         (heroes={}, items={}, rank_stats={}, abilities={}, ultimates={}).",
+        api.heroes.len(),
+        api.items_by_id.len(),
+        api.bracket_winrates.len(),
+        api.abilities.len(),
+        api.hero_ultimate_abilities.len(),
+    );
+    std::process::exit(2);
+}
+
 fn steam_roots() -> Vec<PathBuf> {
     let mut roots = vec![
         PathBuf::from(r"C:\Program Files (x86)\Steam"),
@@ -78,6 +103,7 @@ fn install_gsi_config() {
 }
 
 fn main() -> eframe::Result<()> {
+    refresh_data_pack_if_requested();
     install_gsi_config();
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     let handle = rt.handle().clone();
