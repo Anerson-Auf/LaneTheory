@@ -1527,6 +1527,16 @@ impl OverlayApp {
                                     .color(egui::Color32::from_rgb(148, 163, 184)).size(9.0));
                             }
 
+                            let data_loading = live_state.analytics_status.contains("обновляю");
+                            let data_color = if data_loading {
+                                egui::Color32::from_rgb(250, 204, 21)
+                            } else {
+                                egui::Color32::from_rgb(148, 163, 184)
+                            };
+                            ui.label(egui::RichText::new(&live_state.analytics_status)
+                                .color(data_color).size(9.0))
+                                .on_hover_text("Сеть обновляет данные отдельно от окна. Если сеть или VPN зависли, overlay продолжает работать на локальном пакете.");
+
                             ui.separator();
 
                             // Player profile info (if loaded)

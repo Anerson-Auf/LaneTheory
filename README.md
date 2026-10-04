@@ -58,6 +58,8 @@ LaneTheory не читает память Dota, не внедряется в п�
 3. Первый запуск создаст `gamestate_integration_lanetheory.cfg` в каталоге Dota 2. Если игра уже открыта, полностью перезапустить её.
 4. Для свежей статистики OpenDota нужен доступ к API. При недоступности сети overlay продолжает работать с локальными данными.
 
+Окно LaneTheory открывается до сетевой проверки: данные из embedded snapshot и `.ypk` доступны сразу, а OpenDota и mirror обновляются в фоне. Статус обновления виден в верхней строке HUD. Если приложение аварийно завершилось или старт оборвался, приложи файл `cache/lanetheory-startup.log` — в нём есть фазы старта и panic-диагностика без персональных игровых данных.
+
 `-gamestateintegration` обязателен: с марта 2022 Valve отключила GSI по умолчанию. Файл `.cfg` сообщает Dota, **куда** посылать данные, а launch option включает сам механизм. Не путать с неполным `-gameintegration` — он не является нужным параметром.
 
 ## Данные и обновления
@@ -87,6 +89,7 @@ Workflow **Refresh LaneTheory data pack** запускается вручную 
 ## Недавние изменения
 
 - Добавлен offline data pack `.ypk` и weekly workflow его обновления; GitHub build публикует exe, `.ypk`, `run.bat` и README одним Windows-артефактом.
+- Запуск отделён от сети: native overlay рисуется из offline-пакета сразу, а обновление OpenDota выполняется отдельной задачей; добавлен `cache/lanetheory-startup.log` для диагностики старта и panic.
 - Обновлён transport OpenDota item schema: ответ разбирается из raw body с `Accept-Encoding: identity`, а предыдущий кэш сохраняется при ошибке.
 - Добавлены устойчивые границы матча по `matchid`, очистка ручного драфта, новая сохранённая роль и match-local F5 override.
 - Vision получил pHash, shift-search, отсев пустых карточек, debug screenshot и supervised local variant cache с post-game подтверждением по реальным кропам.

@@ -73,7 +73,10 @@ pub struct DotaApiClient {
 }
 
 impl DotaApiClient {
-    pub async fn new() -> Self {
+    /// Builds a usable client solely from the embedded snapshot and the local
+    /// data pack.  This path deliberately performs no network I/O: the native
+    /// overlay must paint before an unreliable VPN/proxy can delay a refresh.
+    pub fn offline() -> Self {
         let client = reqwest::Client::builder()
             // OpenDota constants are a large compressed document; 8 seconds is
             // routinely too short over a VPN.  HTTP/1.1 also behaves more
@@ -109,9 +112,16 @@ impl DotaApiClient {
             hero_ultimate_abilities: HashMap::new(),
         };
 
-        // Instantly load embedded constants (127 heroes, 501 items)
+        // These bundled sources are sufficient for every panel to render. A
+        // background refresh may replace them later, but it cannot hold the
+        // Windows UI thread hostage.
         instance.load_embedded_data();
         instance.load_data_pack();
+        instance
+    }
+
+    pub async fn new() -> Self {
+        let mut instance = Self::offline();
 
         instance.load_or_fetch_heroes().await;
         instance.load_or_fetch_items().await;

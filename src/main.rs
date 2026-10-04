@@ -7,10 +7,38 @@ mod overlay;
 mod vision;
 
 use eframe::egui;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 const GSI_CONFIG: &str = include_str!("../gamestate_integration_lanetheory.cfg");
+
+fn write_startup_diagnostic(message: &str) {
+    let _ = std::fs::create_dir_all("cache");
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("cache/lanetheory-startup.log")
+    {
+        let _ = writeln!(file, "[{seconds}] {message}");
+    }
+}
+
+fn init_diagnostics() {
+    let _ = std::fs::create_dir_all("cache");
+    let _ = std::fs::write("cache/lanetheory-startup.log", "LaneTheory startup log\n");
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        write_startup_diagnostic(&format!("PANIC: {info}"));
+        previous_hook(info);
+    }));
+    write_startup_diagnostic("process started");
+}
 
 fn refresh_data_pack_if_requested() -> bool {
     if !std::env::args().any(|argument| argument == "--refresh-data-pack") {
@@ -103,16 +131,20 @@ fn install_gsi_config() {
 }
 
 fn main() -> eframe::Result<()> {
+    init_diagnostics();
     refresh_data_pack_if_requested();
     install_gsi_config();
+    write_startup_diagnostic("GSI config check completed");
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     let handle = rt.handle().clone();
 
-    let (api, state) = rt.block_on(async {
-        let api = api::DotaApiClient::new().await;
-        let state = models::LiveGameState::default();
-        (api, state)
-    });
+    // Rendering must start from local/embedded data.  Performing OpenDota
+    // refreshes here used to hold the native event loop for up to several
+    // 45-second network timeouts, leaving Windows with a white "Not
+    // responding" overlay window.
+    let api = api::DotaApiClient::offline();
+    let state = models::LiveGameState::default();
+    write_startup_diagnostic("offline data ready; creating native overlay");
 
     let shared_state = Arc::new(Mutex::new(state));
     let gsi_hero_names = Arc::new(
@@ -126,6 +158,26 @@ fn main() -> eframe::Result<()> {
     // Keep the tokio runtime context active on the main thread
     let _guard = rt.enter();
     gsi::GsiServer::start(shared_state.clone(), shared_api.clone(), gsi_hero_names);
+
+    let refresh_state = shared_state.clone();
+    let refresh_api = shared_api.clone();
+    handle.spawn(async move {
+        if let Ok(mut state) = refresh_state.lock() {
+            state.analytics_status = "Данные: обновляю в фоне…".to_string();
+        }
+        write_startup_diagnostic("background data refresh started");
+        let refreshed = api::DotaApiClient::new().await;
+        let hero_count = refreshed.heroes.len();
+        let item_count = refreshed.items_by_id.len();
+        {
+            let mut active_api = refresh_api.lock().await;
+            *active_api = refreshed;
+        }
+        if let Ok(mut state) = refresh_state.lock() {
+            state.analytics_status = format!("Данные: готовы ({hero_count} героев, {item_count} предметов)");
+        }
+        write_startup_diagnostic("background data refresh completed");
+    });
 
     let (screen_w, screen_h) = unsafe {
         let w = GetSystemMetrics(0); // SM_CXSCREEN

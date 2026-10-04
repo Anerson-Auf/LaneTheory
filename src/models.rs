@@ -208,6 +208,9 @@ pub struct LiveGameState {
     pub is_connected: bool,
     /// Local listener health, shown when Dota has not connected yet.
     pub gsi_listener_status: String,
+    /// Startup and data-refresh state. Unlike GSI, this must never prevent
+    /// the overlay from appearing.
+    pub analytics_status: String,
     pub game_state: String,
     /// Dota's stable identifier for the current game. It is the only
     /// reliable boundary when GSI stops sending payloads after a match and
@@ -254,6 +257,7 @@ impl Default for LiveGameState {
         Self {
             is_connected: false,
             gsi_listener_status: "GSI listener запускается".to_string(),
+            analytics_status: "Данные: локальный пакет готов".to_string(),
             game_state: "menu".to_string(),
             match_id: None,
             clock_time: -999,
