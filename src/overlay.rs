@@ -2741,7 +2741,7 @@ fn render_item_stage_group(
     items: &[PopularItemEntry],
     title_color: egui::Color32,
 ) {
-    let stage_cost: u32 = items.iter().map(|item| item.cost).sum();
+    let stage_cost: u32 = items.iter().map(|item| item.cost * item.quantity as u32).sum();
     render_badge(ui, &format!("{title} · {stage_cost}g"), title_color, 11.5);
     ui.add_space(2.0);
 
@@ -2762,12 +2762,16 @@ fn render_item_stage_group(
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(&item.localized_name)
+                                egui::RichText::new(if item.quantity > 1 {
+                                    format!("{} ×{}", item.localized_name, item.quantity)
+                                } else {
+                                    item.localized_name.clone()
+                                })
                                     .color(egui::Color32::WHITE)
                                     .size(11.5),
                             );
                             ui.label(
-                                egui::RichText::new(format!("{}g", item.cost))
+                                egui::RichText::new(format!("{}g", item.cost * item.quantity as u32))
                                     .color(egui::Color32::from_rgb(148, 163, 184))
                                     .size(10.0),
                             );

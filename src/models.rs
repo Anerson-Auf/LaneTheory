@@ -106,6 +106,9 @@ pub struct PopularItemEntry {
     /// Current schema price. Kept alongside the recommendation so the UI
     /// never relies on a stale hard-coded item cost.
     pub cost: u32,
+    /// Number of copies in a start purchase. Other popularity stages model a
+    /// single completed item, therefore use one.
+    pub quantity: u8,
     pub count: u32,
     pub percentage: f32,
 }

@@ -482,6 +482,28 @@ impl Advisor {
         list.sort_by(|a, b| b.1.cmp(&a.1));
 
         let max_count = list.first().map(|x| x.1).unwrap_or(1).max(1) as f32;
+        // The endpoint counts purchase events, not just matches. It therefore
+        // retains a useful signal for multiple cheap starter copies (e.g.
+        // Iron Branch ×2). Estimate one common purchase from consumables and
+        // utility starters that are normally bought at most once; this is data
+        // from the current population, not a per-hero build table.
+        let start_unit_baseline = if stage == "start" {
+            const SINGLE_PURCHASE_STARTERS: &[&str] = &[
+                "tango", "clarity", "flask", "faerie_fire", "enchanted_mango",
+                "blood_grenade", "magic_stick", "ward_observer", "ward_sentry",
+                "wind_lace", "blight_stone", "orb_of_venom", "infused_raindrop",
+            ];
+            list.iter()
+                .filter_map(|(id, count)| {
+                    let clean = api.items_by_id.get(id)?.clean_name();
+                    SINGLE_PURCHASE_STARTERS.contains(&clean).then_some(*count)
+                })
+                .max()
+                .unwrap_or(1)
+                .max(1)
+        } else {
+            1
+        };
 
         list.into_iter()
             .filter_map(|(id, count)| {
@@ -534,11 +556,17 @@ impl Advisor {
                 }
 
                 let pct = (count as f32 / max_count) * 100.0;
+                let quantity = if stage == "start" {
+                    ((count as f32 / start_unit_baseline as f32).round() as u8).clamp(1, 3)
+                } else {
+                    1
+                };
                 Some(PopularItemEntry {
                     item_name: clean.to_string(),
                     localized_name: item.localized_name.clone(),
                     image_url: item.image_url(),
                     cost,
+                    quantity,
                     count,
                     percentage: pct,
                 })

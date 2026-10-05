@@ -13,11 +13,11 @@ impl GsiServer {
         hero_names_by_id: Arc<HashMap<u32, String>>,
     ) {
         // A bot lobby can return to the menu without a final GSI payload.
-        // The configured five-second heartbeat lets this watchdog provide a
+        // The configured one-second heartbeat lets this watchdog provide a
         // safe session boundary instead of retaining stale Live Match data.
         let watchdog_state = shared_state.clone();
         tokio::spawn(async move {
-            const STALE_AFTER_SECONDS: u64 = 12;
+            const STALE_AFTER_SECONDS: u64 = 3;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 let now = std::time::SystemTime::now()
@@ -40,7 +40,7 @@ impl GsiServer {
                 {
                     state.reset_to_menu();
                     state.is_connected = false;
-                    state.gsi_listener_status = "GSI не присылал обновлений более 12 с; состояние матча сброшено".to_string();
+                    state.gsi_listener_status = "GSI не присылал обновлений более 3 с; состояние матча сброшено".to_string();
                     println!("GSI: нет heartbeat более {STALE_AFTER_SECONDS} с, состояние матча сброшено");
                 }
             }
