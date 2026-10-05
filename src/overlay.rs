@@ -2382,6 +2382,10 @@ impl OverlayApp {
                     .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
                         ui.set_width(270.0);
+                        // `set_width` is only a preferred/minimum width in
+                        // egui. A child layout may otherwise claim the whole
+                        // viewport, which is unacceptable over a live match.
+                        ui.set_max_width(270.0);
                         ui.set_max_height(panel_h);
 
                         if !has_enemies && live_state.my_hero_name.is_none() {
@@ -2532,20 +2536,21 @@ impl OverlayApp {
                                     }
                                     }
 
-                                    // Live status is deliberately placed after the build,
-                                    // not in the global top strip above Valve's draft row.
-                                    if live_state.game_state == "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
-                                        || live_state.game_state == "DOTA_GAMERULES_STATE_PRE_GAME"
-                                    {
-                                        ui.add_space(6.0);
-                                        render_live_match_summary(ui, live_state, pos);
-                                    }
                                 }
                             });
                             self.right_panel_scroll = scroll.state.offset.y;
                         }
                     });
             });
+
+        // CS/NW is live telemetry, not part of the purchase recommendation.
+        // Keep it in a separate plate directly under the fixed build column.
+        if matches!(
+            live_state.game_state.as_str(),
+            "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS" | "DOTA_GAMERULES_STATE_PRE_GAME"
+        ) {
+            render_live_match_summary_panel(ctx, live_state, pos, panel_x, panel_h);
+        }
     }
 }
 
@@ -2756,23 +2761,21 @@ fn render_item_stage_group(
 
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("{:.0}%", item.percentage))
-                                        .strong()
-                                        .color(egui::Color32::from_rgb(235, 195, 80))
-                                        .size(11.0),
-                                );
-                                ui.label(
-                                    egui::RichText::new(format!("{}g", item.cost))
-                                        .color(egui::Color32::from_rgb(148, 163, 184))
-                                        .size(10.0),
-                                );
-                            });
                             ui.label(
                                 egui::RichText::new(&item.localized_name)
                                     .color(egui::Color32::WHITE)
                                     .size(11.5),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("{}g", item.cost))
+                                    .color(egui::Color32::from_rgb(148, 163, 184))
+                                    .size(10.0),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("{:.0}%", item.percentage))
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(235, 195, 80))
+                                    .size(11.0),
                             );
                         });
 
@@ -2789,7 +2792,13 @@ fn render_item_stage_group(
     }
 }
 
-fn render_live_match_summary(ui: &mut egui::Ui, live_state: &LiveGameState, pos: PlayerPosition) {
+fn render_live_match_summary_panel(
+    ctx: &egui::Context,
+    live_state: &LiveGameState,
+    pos: PlayerPosition,
+    panel_x: f32,
+    build_panel_height: f32,
+) {
     let minute = (live_state.clock_time.max(0) / 60) as u32;
     // A broad pace reference, not a prescribed purchase order. It follows the
     // game clock and keeps the role visible without covering Valve's draft row.
@@ -2807,15 +2816,28 @@ fn render_live_match_summary(ui: &mut egui::Ui, live_state: &LiveGameState, pos:
     } else {
         egui::Color32::from_rgb(248, 113, 113)
     };
-    render_badge(ui, &format!("{} · live", pos.short_name()), egui::Color32::from_rgb(96, 165, 250), 11.5);
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("CS {}/{}", live_state.last_hits, live_state.denies))
-            .color(egui::Color32::from_rgb(226, 232, 240)).size(10.5));
-        ui.label(egui::RichText::new(format!("NW {}g", live_state.net_worth))
-            .color(egui::Color32::from_rgb(234, 179, 8)).strong().size(10.5));
-    });
-    ui.label(egui::RichText::new(format!("Ориентир {target}g · {:+}g", delta))
-        .color(delta_color).size(10.0));
+    egui::Area::new(egui::Id::new("hud_live_match_summary"))
+        .fixed_pos(egui::pos2(panel_x, 44.0 + build_panel_height + 8.0))
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgba_unmultiplied(10, 14, 22, 155))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(40, 55, 75, 145)))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.set_width(270.0);
+                    ui.set_max_width(270.0);
+                    render_badge(ui, pos.short_name(), egui::Color32::from_rgb(96, 165, 250), 11.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("CS {}/{}", live_state.last_hits, live_state.denies))
+                            .color(egui::Color32::from_rgb(226, 232, 240)).size(10.5));
+                        ui.label(egui::RichText::new(format!("NW {}g", live_state.net_worth))
+                            .color(egui::Color32::from_rgb(234, 179, 8)).strong().size(10.5));
+                    });
+                    ui.label(egui::RichText::new(format!("Ориентир {target}g · {:+}g", delta))
+                        .color(delta_color).size(10.0));
+                });
+        });
 }
 
 
