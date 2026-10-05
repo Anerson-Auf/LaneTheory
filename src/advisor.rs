@@ -356,7 +356,7 @@ impl Advisor {
         if !matched_illu.is_empty() {
             add_item(
                 "mjollnir",
-                &format!("Сплеш для дальников: {}", matched_illu.join(", ")),
+                &format!("Магический урон, сплеш, хорошо против иллюзий (не замены БФ): {}", matched_illu.join(", ")),
                 5,
             );
             add_item("radiance", "Фарм, сжигание иллюзий и 20% промахов", 4);
@@ -538,6 +538,7 @@ impl Advisor {
                     item_name: clean.to_string(),
                     localized_name: item.localized_name.clone(),
                     image_url: item.image_url(),
+                    cost,
                     count,
                     percentage: pct,
                 })
@@ -558,10 +559,21 @@ impl Advisor {
     ) {
         // A build must come from current population data.  Inventing a static fallback
         // makes the UI look complete, but turns every fallback into a false 100% pick.
-        let start = Self::get_popular_items_stage(api, &pop.start_game_items, "start");
-        let early = Self::get_popular_items_stage(api, &pop.early_game_items, "early");
-        let mid = Self::get_popular_items_stage(api, &pop.mid_game_items, "mid");
-        let late = Self::get_popular_items_stage(api, &pop.late_game_items, "late");
+        // OpenDota exposes separate popularity buckets rather than one
+        // deterministic purchase sequence. Keep the earliest useful stage
+        // for a repeated item: showing the same slot in every bucket makes a
+        // popularity list look like a mandatory, contradictory build.
+        let mut seen = std::collections::HashSet::new();
+        let mut unique = |items: Vec<PopularItemEntry>| {
+            items
+                .into_iter()
+                .filter(|item| seen.insert(item.item_name.clone()))
+                .collect::<Vec<_>>()
+        };
+        let start = unique(Self::get_popular_items_stage(api, &pop.start_game_items, "start"));
+        let early = unique(Self::get_popular_items_stage(api, &pop.early_game_items, "early"));
+        let mid = unique(Self::get_popular_items_stage(api, &pop.mid_game_items, "mid"));
+        let late = unique(Self::get_popular_items_stage(api, &pop.late_game_items, "late"));
 
         (start, early, mid, late)
     }
