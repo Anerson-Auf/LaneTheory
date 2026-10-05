@@ -70,6 +70,9 @@ pub struct DotaApiClient {
     /// Hero internal name -> current ultimate ability. Derived from OpenDota's
     /// hero_abilities constants, so a patch can update it without code changes.
     pub hero_ultimate_abilities: HashMap<String, String>,
+    /// Hero internal name -> cooldown-bearing ability keys in the current
+    /// schema. This lets the tracker cover long cooldown basic spells too.
+    pub hero_abilities: HashMap<String, Vec<String>>,
 }
 
 impl DotaApiClient {
@@ -110,6 +113,7 @@ impl DotaApiClient {
             bracket_winrates: HashMap::new(),
             abilities: HashMap::new(),
             hero_ultimate_abilities: HashMap::new(),
+            hero_abilities: HashMap::new(),
         };
 
         // These bundled sources are sufficient for every panel to render. A
@@ -154,6 +158,9 @@ impl DotaApiClient {
                 if !pack.hero_ultimate_abilities().is_empty() {
                     self.hero_ultimate_abilities = pack.hero_ultimate_abilities().clone();
                 }
+                if !pack.hero_abilities().is_empty() {
+                    self.hero_abilities = pack.hero_abilities().clone();
+                }
                 println!(
                     "YPK загружен: {} героев, {} предметов, {} способностей",
                     self.heroes.len(),
@@ -180,6 +187,7 @@ impl DotaApiClient {
             bracket_winrates,
             self.abilities.clone(),
             self.hero_ultimate_abilities.clone(),
+            self.hero_abilities.clone(),
         ) {
             Ok(path) => println!("YPK обновлён: {}", path.display()),
             Err(error) => eprintln!("Не удалось обновить YPK: {error}"),
@@ -198,6 +206,7 @@ impl DotaApiClient {
             && self.bracket_winrates.len() >= 80
             && self.abilities.len() >= 1_000
             && self.hero_ultimate_abilities.len() >= 100
+            && self.hero_abilities.len() >= 100
     }
 
     async fn load_or_fetch_heroes(&mut self) {
@@ -475,8 +484,8 @@ impl DotaApiClient {
     }
 
     async fn load_or_fetch_hero_abilities(&mut self) {
-        if !self.hero_ultimate_abilities.is_empty() {
-            println!("Ультимейтов героев из YPK загружено: {}", self.hero_ultimate_abilities.len());
+        if !self.hero_ultimate_abilities.is_empty() && !self.hero_abilities.is_empty() {
+            println!("Способностей героев из YPK загружено: {}", self.hero_abilities.len());
             return;
         }
         let cache_file = format!("{CACHE_DIR}/hero_abilities.json");
@@ -513,8 +522,21 @@ impl DotaApiClient {
             // The data describes ability slots in the same order as the hero HUD.
             // Index 5 is the hero's ultimate slot; the elements before/after it
             // include basic abilities, hidden placeholders, innates and facets.
-            let ultimate = value.get("abilities")
-                .and_then(|abilities| abilities.as_array())
+            let slots = value.get("abilities")
+                .and_then(|abilities| abilities.as_array());
+            let cooldown_abilities = slots
+                .into_iter()
+                .flatten()
+                .filter_map(|ability| ability.as_str())
+                .filter(|ability| !ability.is_empty() && *ability != "generic_hidden")
+                .filter(|ability| self.abilities.get(*ability)
+                    .is_some_and(|data| !data.cooldowns.is_empty()))
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            if !cooldown_abilities.is_empty() {
+                self.hero_abilities.insert(hero_name.clone(), cooldown_abilities);
+            }
+            let ultimate = slots
                 .and_then(|abilities| abilities.get(5))
                 .and_then(|ability| ability.as_str())
                 .filter(|ability| !ability.is_empty() && *ability != "generic_hidden");
@@ -522,33 +544,47 @@ impl DotaApiClient {
                 self.hero_ultimate_abilities.insert(hero_name, ultimate.to_string());
             }
         }
-        println!("Ультимейтов героев загружено: {}", self.hero_ultimate_abilities.len());
+        println!("Способностей героев загружено: {}; ультимейтов: {}", self.hero_abilities.len(), self.hero_ultimate_abilities.len());
     }
 
-    pub fn ultimates_for_enemies(&self, enemy_hero_names: &[String]) -> Vec<crate::models::TrackedSpell> {
-        enemy_hero_names.iter().filter_map(|enemy_name| {
+    pub fn cooldown_abilities_for_enemies(&self, enemy_hero_names: &[String]) -> Vec<crate::models::TrackedSpell> {
+        enemy_hero_names.iter().flat_map(|enemy_name| {
             let hero_key = if enemy_name.starts_with("npc_dota_hero_") {
                 enemy_name.clone()
             } else {
                 format!("npc_dota_hero_{enemy_name}")
             };
-            let ability_key = self.hero_ultimate_abilities.get(&hero_key)?;
-            let ability = self.abilities.get(ability_key)?;
             let hero_name = self.find_hero(&hero_key)
                 .map(|hero| hero.localized_name.clone())
                 .unwrap_or_else(|| enemy_name.strip_prefix("npc_dota_hero_").unwrap_or(enemy_name).replace('_', " "));
-            Some(crate::models::TrackedSpell {
-                hero_name,
-                spell_name: ability_key.clone(),
-                localized_spell: ability.localized_name.clone(),
-                ability_key: ability_key.clone(),
-                base_cd: ability.cooldowns.first().copied().unwrap_or(0),
-                cooldowns: ability.cooldowns.clone(),
-                ability_image: ability.image_url.clone(),
-                ultimate_level: None,
-                enemy_level: None,
-                on_cooldown_until: None,
-            })
+            let ultimate = self.hero_ultimate_abilities.get(&hero_key).cloned();
+            let ability_keys = self.hero_abilities.get(&hero_key)
+                .cloned()
+                // Old YPK files still support ultimate tracking until the
+                // background refresh writes the richer ability map.
+                .or_else(|| ultimate.clone().map(|key| vec![key]))
+                .unwrap_or_default();
+            ability_keys.into_iter().filter_map(move |ability_key| {
+                let ability = self.abilities.get(&ability_key)?;
+                if ability.cooldowns.is_empty() {
+                    return None;
+                }
+                let is_ultimate = ultimate.as_deref() == Some(ability_key.as_str());
+                Some(crate::models::TrackedSpell {
+                    hero_name: hero_name.clone(),
+                    spell_name: ability_key.clone(),
+                    localized_spell: ability.localized_name.clone(),
+                    ability_key,
+                    base_cd: ability.cooldowns.first().copied().unwrap_or(0),
+                    cooldowns: ability.cooldowns.clone(),
+                    ability_image: ability.image_url.clone(),
+                    ability_level: None,
+                    max_level: ability.cooldowns.len().clamp(1, 4) as u8,
+                    is_ultimate,
+                    enemy_level: None,
+                    on_cooldown_until: None,
+                })
+            }).collect::<Vec<_>>()
         }).collect()
     }
 

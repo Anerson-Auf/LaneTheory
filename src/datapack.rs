@@ -21,6 +21,8 @@ pub struct DataPack {
     bracket_winrates: Vec<HeroBracketWinrates>,
     abilities: HashMap<String, AbilityData>,
     hero_ultimate_abilities: HashMap<String, String>,
+    #[serde(default)]
+    hero_abilities: HashMap<String, Vec<String>>,
 }
 
 impl DataPack {
@@ -53,6 +55,7 @@ impl DataPack {
         bracket_winrates: Vec<HeroBracketWinrates>,
         abilities: HashMap<String, AbilityData>,
         hero_ultimate_abilities: HashMap<String, String>,
+        hero_abilities: HashMap<String, Vec<String>>,
     ) -> Result<PathBuf, String> {
         let generated_at_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -67,6 +70,7 @@ impl DataPack {
             bracket_winrates,
             abilities,
             hero_ultimate_abilities,
+            hero_abilities,
         };
         let path = pack_path();
         let encoded = serde_json::to_vec_pretty(&pack).map_err(|error| error.to_string())?;
@@ -112,6 +116,10 @@ impl DataPack {
     pub fn hero_ultimate_abilities(&self) -> &HashMap<String, String> {
         &self.hero_ultimate_abilities
     }
+
+    pub fn hero_abilities(&self) -> &HashMap<String, Vec<String>> {
+        &self.hero_abilities
+    }
 }
 
 fn pack_path() -> PathBuf {
@@ -148,6 +156,7 @@ mod tests {
             bracket_winrates: Vec::new(),
             abilities: HashMap::new(),
             hero_ultimate_abilities: HashMap::new(),
+            hero_abilities: HashMap::new(),
         };
         let json = serde_json::to_string(&pack).unwrap();
         let decoded: DataPack = serde_json::from_str(&json).unwrap();

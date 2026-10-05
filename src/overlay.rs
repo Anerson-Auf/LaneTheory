@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 pub static HOTKEY_F6_TRIGGERED: AtomicBool = AtomicBool::new(false);
 pub static HOTKEY_F7_TRIGGERED: AtomicBool = AtomicBool::new(false);
 pub static HOTKEY_F8_TRIGGERED: AtomicBool = AtomicBool::new(false);
-pub static HOTKEY_F9_TRIGGERED: AtomicBool = AtomicBool::new(false);
 pub static HOTKEY_F5_TRIGGERED: AtomicBool = AtomicBool::new(false);
 pub static VISION_SCAN_TRIGGERED: AtomicBool = AtomicBool::new(false);
 static PASSIVE_SCROLL_STEPS: AtomicI32 = AtomicI32::new(0);
@@ -161,9 +160,9 @@ fn tracked_spell_key(spell: &crate::models::TrackedSpell) -> String {
     spell.ability_key.to_lowercase()
 }
 
-fn apply_ultimate_tier(spell: &mut crate::models::TrackedSpell, tier: u8) {
-    let tier = tier.clamp(1, 3);
-    spell.ultimate_level = Some(tier);
+fn apply_ability_level(spell: &mut crate::models::TrackedSpell, tier: u8) {
+    let tier = tier.clamp(1, spell.max_level.max(1));
+    spell.ability_level = Some(tier);
     if let Some(cooldown) = spell.cooldowns.get((tier - 1) as usize) {
         spell.base_cd = *cooldown;
     }
@@ -174,13 +173,12 @@ fn start_global_hotkey_listener() {
         unsafe {
             // RegisterHotKey(hWnd, id, fsModifiers, vk)
             // MOD_NOREPEAT = 0x4000
-            // VK_F5 = 0x74, VK_F6 = 0x75, VK_F7 = 0x76, VK_F8 = 0x77, VK_F9 = 0x78, VK_F10 = 0x79
+            // VK_F5 = 0x74, VK_F6 = 0x75, VK_F7 = 0x76, VK_F8 = 0x77, VK_F10 = 0x79
             let _ = RegisterHotKey(std::ptr::null_mut(), 1, 0x4000, 0x75);
             let _ = RegisterHotKey(std::ptr::null_mut(), 2, 0x4000, 0x77);
             let _ = RegisterHotKey(std::ptr::null_mut(), 3, 0x4000, 0x76);
-            let _ = RegisterHotKey(std::ptr::null_mut(), 4, 0x4000, 0x78);
-            let _ = RegisterHotKey(std::ptr::null_mut(), 5, 0x4000, 0x79);
-            let _ = RegisterHotKey(std::ptr::null_mut(), 6, 0x4000, 0x74);
+            let _ = RegisterHotKey(std::ptr::null_mut(), 4, 0x4000, 0x79);
+            let _ = RegisterHotKey(std::ptr::null_mut(), 5, 0x4000, 0x74);
             let _ = SetWindowsHookExW(14, Some(passive_mouse_hook), std::ptr::null_mut(), 0);
 
             let mut msg: MSG = std::mem::zeroed();
@@ -190,9 +188,8 @@ fn start_global_hotkey_listener() {
                         1 => HOTKEY_F6_TRIGGERED.store(true, Ordering::SeqCst),
                         2 => HOTKEY_F8_TRIGGERED.store(true, Ordering::SeqCst),
                         3 => HOTKEY_F7_TRIGGERED.store(true, Ordering::SeqCst),
-                        4 => HOTKEY_F9_TRIGGERED.store(true, Ordering::SeqCst),
-                        5 => VISION_SCAN_TRIGGERED.store(true, Ordering::SeqCst),
-                        6 => HOTKEY_F5_TRIGGERED.store(true, Ordering::SeqCst),
+                        4 => VISION_SCAN_TRIGGERED.store(true, Ordering::SeqCst),
+                        5 => HOTKEY_F5_TRIGGERED.store(true, Ordering::SeqCst),
                         _ => {}
                     }
                 }
@@ -266,7 +263,6 @@ pub struct OverlayApp {
     prev_f6_down: bool,
     prev_f7_down: bool,
     prev_f8_down: bool,
-    prev_f9_down: bool,
     hwnd_applied: bool,
 
     // Settings & interactivity
@@ -478,7 +474,6 @@ impl OverlayApp {
             prev_f6_down: false,
             prev_f7_down: false,
             prev_f8_down: false,
-            prev_f9_down: false,
             hwnd_applied: false,
 
             settings: OverlaySettings::load(),
@@ -585,27 +580,6 @@ impl OverlayApp {
             }
             self.prev_f8_down = f8_down;
 
-            // VK_F9 = 0x78 (Toggle Roshan timer)
-            let f9_hotkey = HOTKEY_F9_TRIGGERED.swap(false, Ordering::SeqCst);
-            let f9_down = (GetAsyncKeyState(0x78) as u16 & 0x8000) != 0;
-            if f9_hotkey || (f9_down && !self.prev_f9_down) {
-                self.toggle_roshan(true);
-            }
-            self.prev_f9_down = f9_down;
-        }
-    }
-
-    pub fn toggle_roshan(&mut self, is_ally: bool) {
-        let mut st = self.state.lock().unwrap();
-        let cur_clock = if self.test_mode_enabled { self.simulated_clock_time.unwrap_or(300) } else { st.clock_time.max(0) };
-        if st.roshan.is_tracking {
-            st.roshan = crate::models::RoshanState::default();
-        } else {
-            st.roshan = crate::models::RoshanState {
-                is_tracking: true,
-                kill_clock_time: cur_clock,
-                is_ally,
-            };
         }
     }
 
@@ -711,6 +685,8 @@ impl eframe::App for OverlayApp {
         let entered_new_match = self.previous_match_id.is_some()
             && live_state.match_id.is_some()
             && self.previous_match_id != live_state.match_id;
+        let entered_hero_selection = live_state.game_state == "DOTA_GAMERULES_STATE_HERO_SELECTION"
+            && self.previous_game_state != "DOTA_GAMERULES_STATE_HERO_SELECTION";
         let entered_strategy_time = live_state.game_state == "DOTA_GAMERULES_STATE_STRATEGY_TIME"
             && self.previous_game_state != "DOTA_GAMERULES_STATE_STRATEGY_TIME";
         let finished_captured_match = live_state.game_state == "menu"
@@ -723,6 +699,9 @@ impl eframe::App for OverlayApp {
             && !self.previous_game_state.is_empty()
             && self.previous_game_state != "menu")
             || entered_new_match
+            // Bot lobbies often do not send a final menu payload. Hero
+            // Selection is therefore also a hard per-match boundary.
+            || entered_hero_selection
         {
             self.manual_enemy_heroes.clear();
             self.manual_ally_heroes.clear();
@@ -781,12 +760,13 @@ impl eframe::App for OverlayApp {
         if clicked_ultimate >= 1000 {
             let index = (clicked_ultimate - 1000) as usize;
             if let Some(spell) = self.tracked_ultimates.get_mut(index) {
-                let next_tier = match spell.ultimate_level.unwrap_or(0) {
-                    0 | 3 => 1,
+                let next_tier = match spell.ability_level.unwrap_or(0) {
+                    0 if spell.max_level > 0 => 1,
+                    current if current >= spell.max_level => 1,
                     tier => tier + 1,
                 };
                 self.manual_ultimate_levels.insert(tracked_spell_key(spell), next_tier);
-                apply_ultimate_tier(spell, next_tier);
+                apply_ability_level(spell, next_tier);
             }
         } else if let Some(spell) = self.tracked_ultimates.get_mut(clicked_ultimate.max(0) as usize)
             .filter(|_| clicked_ultimate >= 0)
@@ -876,15 +856,15 @@ impl eframe::App for OverlayApp {
             // Every ultimate comes from current OpenDota hero ability constants,
             // not a hand-maintained subset of "important" heroes.
             let mut new_spells = self.api.try_lock().ok()
-                .map(|api| api.ultimates_for_enemies(&active_enemies))
+                .map(|api| api.cooldown_abilities_for_enemies(&active_enemies))
                 .unwrap_or_default();
             for spell in &mut new_spells {
                 let manual_tier = self.manual_ultimate_levels.get(&tracked_spell_key(spell)).copied();
                 if let Some(tier) = manual_tier {
                     // A user who saw the level-up knows the ult tier more
                     // precisely than player-perspective GSI can report it.
-                    apply_ultimate_tier(spell, tier);
-                } else if let Some((_, level)) = live_state.enemy_levels.iter().find(|(hero, _)| {
+                    apply_ability_level(spell, tier);
+                } else if spell.is_ultimate && let Some((_, level)) = live_state.enemy_levels.iter().find(|(hero, _)| {
                     spell.ability_key.starts_with(hero.strip_prefix("npc_dota_hero_").unwrap_or(hero))
                 }) {
                     spell.enemy_level = Some(*level);
@@ -895,7 +875,7 @@ impl eframe::App for OverlayApp {
                     if let Some(cooldown) = spell.cooldowns.get(tier) {
                         spell.base_cd = *cooldown;
                     }
-                    spell.ultimate_level = Some((tier + 1) as u8);
+                    spell.ability_level = Some((tier + 1) as u8);
                 }
             }
             let mut updated_ultimates = Vec::new();
@@ -1093,7 +1073,9 @@ impl eframe::App for OverlayApp {
         }
 
         // 1. Render Top Status Bar
-        if show_hud && (self.settings.show_top_bar || self.is_settings_open) {
+        // The profile/network strip belongs to the menu. During a draft or a
+        // match it covers Valve's pick row and adds no time-critical value.
+        if show_hud && is_in_menu && (self.settings.show_top_bar || self.is_settings_open) {
             self.render_top_bar(&ctx, &live_state, effective_position, effective_clock_time, is_match_active);
         }
         if show_hud && (is_match_active || self.test_mode_enabled) {
@@ -1154,14 +1136,7 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        // 5. Camp Timing Pill (Stacks & Pulls): subtle 1-line chip on left side, NOT covering center!
-        if show_notifications && self.settings.show_camp_pill && ((is_match_active && effective_clock_time >= 30) || self.simulated_clock_time.is_some()) {
-            if let Some(camp_alert) = get_subtle_camp_alert(effective_clock_time, effective_position, &self.settings) {
-                render_subtle_camp_pill(&ctx, &camp_alert);
-            }
-        }
-
-        // 6. Interactive Settings Window (F8)
+        // 5. Interactive Settings Window (F8)
         if show_hud && self.is_settings_open {
             self.render_settings_window(&ctx, screen_w, screen_h);
         }
@@ -1617,6 +1592,24 @@ impl OverlayApp {
                     .inner_margin(egui::Margin::symmetric(7, 6))
                     .show(ui, |ui| {
                         ui.set_width(164.0);
+                        // Pull/stack timing is an objective, not a detached
+                        // banner over the draft UI. Keep it directly above the
+                        // objective list in the same left-centre stack.
+                        if self.settings.show_camp_pill {
+                            if let Some(alert) = get_subtle_camp_alert(
+                                clock_time,
+                                self.manual_position.unwrap_or(self.settings.preferred_position),
+                                &self.settings,
+                            ) {
+                                let color = if alert.is_pull {
+                                    egui::Color32::from_rgb(56, 189, 248)
+                                } else {
+                                    egui::Color32::from_rgb(250, 204, 21)
+                                };
+                                render_badge(ui, &format!("{} · {}", alert.label, alert.badge), color, 10.0);
+                                ui.add_space(4.0);
+                            }
+                        }
                         if self.settings.show_top_timers {
                             render_badge(ui, "Objectives", egui::Color32::from_rgb(147, 197, 253), 11.0);
                             let display = |name: &str, seconds: i32, color: egui::Color32, ui: &mut egui::Ui| {
@@ -1669,7 +1662,7 @@ impl OverlayApp {
                                     });
                                 }
                             } else {
-                                ui.label(egui::RichText::new("F9: Our · выбери сторону ниже")
+                                ui.label(egui::RichText::new("Выбери сторону ниже")
                                     .size(9.0).color(egui::Color32::from_rgb(148, 163, 184)));
                             }
                             ui.horizontal(|ui| {
@@ -1695,21 +1688,22 @@ impl OverlayApp {
                             if self.settings.show_top_timers {
                                 ui.add_space(5.0);
                             }
-                            render_badge(ui, "Enemy ultimates", egui::Color32::from_rgb(248, 113, 113), 11.0);
+                            render_badge(ui, "Enemy abilities", egui::Color32::from_rgb(248, 113, 113), 11.0);
                             if self.tracked_ultimates.is_empty() {
                                 ui.label(egui::RichText::new("Нет пиков: добавь их в draft picker").color(egui::Color32::from_rgb(148, 163, 184)).size(9.5));
                             } else {
-                                ui.label(egui::RichText::new("ЛКМ: CD/сброс · R: уровень").color(egui::Color32::from_rgb(148, 163, 184)).size(9.0));
+                                ui.label(egui::RichText::new("ЛКМ: CD/сброс · L: уровень").color(egui::Color32::from_rgb(148, 163, 184)).size(9.0));
                             }
                             for (index, spell) in self.tracked_ultimates.iter().enumerate() {
                                 let (text, color) = match spell.on_cooldown_until {
                                     Some(until) if until > clock_time => (format!("{}  {}с", spell.localized_spell, until - clock_time), egui::Color32::from_rgb(248, 113, 113)),
                                     _ => (format!("{}  ready", spell.localized_spell), egui::Color32::from_rgb(74, 222, 128)),
                                 };
-                                let level_hint = spell.ultimate_level
-                                    .map(|tier| format!("  R{tier}"))
-                                    .or_else(|| spell.enemy_level.map(|level| format!("  L{level} · R?")))
-                                    .unwrap_or_else(|| "  R?".to_string());
+                                let level_prefix = if spell.is_ultimate { "R" } else { "L" };
+                                let level_hint = spell.ability_level
+                                    .map(|tier| format!("  {level_prefix}{tier}"))
+                                    .or_else(|| spell.enemy_level.map(|level| format!("  H{level} · {level_prefix}?")))
+                                    .unwrap_or_else(|| format!("  {level_prefix}?"));
                                 ui.horizontal(|ui| {
                                     if !spell.ability_image.is_empty() {
                                         ui.add(egui::Image::new(&spell.ability_image).fit_to_exact_size(egui::vec2(18.0, 14.0)).corner_radius(2));
@@ -1721,7 +1715,7 @@ impl OverlayApp {
                                     hitboxes.push(response_screen_hitbox(index as i32, response.rect, ctx.pixels_per_point()));
                                     let level_response = ui.add(egui::Button::new(
                                         egui::RichText::new(level_hint).size(9.5).color(egui::Color32::from_rgb(216, 180, 254))
-                                    ).min_size(egui::vec2(35.0, 19.0)).corner_radius(3)).on_hover_text("Меняет уровень ультимейта: R1 → R2 → R3");
+                                    ).min_size(egui::vec2(35.0, 19.0)).corner_radius(3)).on_hover_text("Меняет уровень способности и cooldown");
                                     if level_response.clicked() {
                                         direct_level_click = Some(index as i32);
                                     }
@@ -2123,20 +2117,22 @@ impl OverlayApp {
                         ui.add_space(6.0);
                         ui.separator();
                         ui.add_space(3.0);
-                        ui.label(egui::RichText::new("Уровень ультимейта")
+                        ui.label(egui::RichText::new("Уровень способности")
                             .strong().size(11.0).color(egui::Color32::from_rgb(192, 132, 252)));
                         if self.tracked_ultimates.is_empty() {
-                            ui.label(egui::RichText::new("Добавь героя с ключевым ультимейтом — здесь появится выбор R I / II / III.")
+                            ui.label(egui::RichText::new("Добавь героя — здесь появится выбор уровня его способностей с cooldown.")
                                 .size(9.5).color(egui::Color32::from_rgb(148, 163, 184)));
                         } else {
                             for spell in &self.tracked_ultimates {
                                 let key = tracked_spell_key(spell);
                                 let current = self.manual_ultimate_levels.get(&key)
-                                    .copied().or(spell.ultimate_level).unwrap_or(1);
+                                    .copied().or(spell.ability_level).unwrap_or(1);
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new(format!("{}:", spell.localized_spell))
                                         .size(10.0).color(egui::Color32::from_rgb(226, 232, 240)));
-                                    for (tier, label) in [(1_u8, "R I"), (2, "R II"), (3, "R III")] {
+                                    for tier in 1..=spell.max_level.max(1) {
+                                        let prefix = if spell.is_ultimate { "R" } else { "L" };
+                                        let label = format!("{prefix}{tier}");
                                         let selected = current == tier;
                                         if ui.add(egui::Button::new(egui::RichText::new(label).size(9.5))
                                             .fill(if selected { egui::Color32::from_rgb(124, 58, 237) } else { egui::Color32::TRANSPARENT })
@@ -2147,7 +2143,7 @@ impl OverlayApp {
                                 });
                             }
                         }
-                        ui.label(egui::RichText::new("R? означает, что уровень не подтверждён. Выбор меняет cooldown для таймера.")
+                        ui.label(egui::RichText::new("R?/L? означает, что уровень не подтверждён. Выбор меняет cooldown для таймера.")
                             .size(8.8).color(egui::Color32::from_rgb(148, 163, 184)));
                     });
             });
@@ -2182,7 +2178,7 @@ impl OverlayApp {
             self.manual_ultimate_levels.insert(key.clone(), tier);
             for spell in &mut self.tracked_ultimates {
                 if tracked_spell_key(spell) == key {
-                    apply_ultimate_tier(spell, tier);
+                    apply_ability_level(spell, tier);
                 }
             }
         }
@@ -2484,16 +2480,6 @@ impl OverlayApp {
 
                                 // 2. Builds for Current / Selected Hero (All 4 stages: Start, Early, Mid, Late)
                                 if live_state.my_hero_name.is_some() || self.test_mode_enabled {
-                                    let current_hero_label = if let Some(h) = &live_state.my_hero_name {
-                                        let clean = h.strip_prefix("npc_dota_hero_").unwrap_or(h);
-                                        format!("Build: {clean}")
-                                    } else {
-                                        "Build: Storm Spirit (test)".to_string()
-                                    };
-
-                                    render_badge(ui, &current_hero_label, egui::Color32::from_rgb(240, 204, 75), 12.0);
-                                    ui.add_space(4.0);
-
                                     if self.settings.build_source == crate::models::BuildSource::Dota2ProTracker {
                                         let hero_name = live_state.my_hero_name.as_deref()
                                             .unwrap_or("npc_dota_hero_storm_spirit");
@@ -2544,6 +2530,15 @@ impl OverlayApp {
                                     } else {
                                         ui.label(egui::RichText::new("OpenDota: агрегат по всем ролям, не role-specific build.").color(egui::Color32::from_rgb(148, 163, 184)).size(11.0));
                                     }
+                                    }
+
+                                    // Live status is deliberately placed after the build,
+                                    // not in the global top strip above Valve's draft row.
+                                    if live_state.game_state == "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
+                                        || live_state.game_state == "DOTA_GAMERULES_STATE_PRE_GAME"
+                                    {
+                                        ui.add_space(6.0);
+                                        render_live_match_summary(ui, live_state, pos);
                                     }
                                 }
                             });
@@ -2741,10 +2736,11 @@ fn render_item_stage_group(
     items: &[PopularItemEntry],
     title_color: egui::Color32,
 ) {
-    render_badge(ui, title, title_color, 11.5);
+    let stage_cost: u32 = items.iter().map(|item| item.cost).sum();
+    render_badge(ui, &format!("{title} · {stage_cost}g"), title_color, 11.5);
     ui.add_space(2.0);
 
-    for item in items.iter().take(4) {
+    for item in items {
         egui::Frame::NONE
             .fill(egui::Color32::from_rgba_unmultiplied(14, 18, 26, 130))
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(45, 58, 78, 100)))
@@ -2760,11 +2756,6 @@ fn render_item_stage_group(
 
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(&item.localized_name)
-                                    .color(egui::Color32::WHITE)
-                                    .size(11.5),
-                            );
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(
                                     egui::RichText::new(format!("{:.0}%", item.percentage))
@@ -2772,7 +2763,17 @@ fn render_item_stage_group(
                                         .color(egui::Color32::from_rgb(235, 195, 80))
                                         .size(11.0),
                                 );
+                                ui.label(
+                                    egui::RichText::new(format!("{}g", item.cost))
+                                        .color(egui::Color32::from_rgb(148, 163, 184))
+                                        .size(10.0),
+                                );
                             });
+                            ui.label(
+                                egui::RichText::new(&item.localized_name)
+                                    .color(egui::Color32::WHITE)
+                                    .size(11.5),
+                            );
                         });
 
                         let progress = (item.percentage / 100.0).clamp(0.0, 1.0);
@@ -2786,6 +2787,35 @@ fn render_item_stage_group(
             });
         ui.add_space(2.0);
     }
+}
+
+fn render_live_match_summary(ui: &mut egui::Ui, live_state: &LiveGameState, pos: PlayerPosition) {
+    let minute = (live_state.clock_time.max(0) / 60) as u32;
+    // A broad pace reference, not a prescribed purchase order. It follows the
+    // game clock and keeps the role visible without covering Valve's draft row.
+    let expected_gpm = match pos {
+        PlayerPosition::Pos1Carry => 520,
+        PlayerPosition::Pos2Mid => 500,
+        PlayerPosition::Pos3Offlane => 430,
+        PlayerPosition::Pos4SoftSupport => 360,
+        PlayerPosition::Pos5HardSupport => 320,
+    };
+    let target = 600 + minute * expected_gpm;
+    let delta = live_state.net_worth as i64 - target as i64;
+    let delta_color = if delta >= 0 {
+        egui::Color32::from_rgb(74, 222, 128)
+    } else {
+        egui::Color32::from_rgb(248, 113, 113)
+    };
+    render_badge(ui, &format!("{} · live", pos.short_name()), egui::Color32::from_rgb(96, 165, 250), 11.5);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(format!("CS {}/{}", live_state.last_hits, live_state.denies))
+            .color(egui::Color32::from_rgb(226, 232, 240)).size(10.5));
+        ui.label(egui::RichText::new(format!("NW {}g", live_state.net_worth))
+            .color(egui::Color32::from_rgb(234, 179, 8)).strong().size(10.5));
+    });
+    ui.label(egui::RichText::new(format!("Ориентир {target}g · {:+}g", delta))
+        .color(delta_color).size(10.0));
 }
 
 
@@ -2911,30 +2941,6 @@ pub fn get_subtle_camp_alert(clock_time: i32, pos: PlayerPosition, settings: &Ov
     }
 
     None
-}
-
-fn render_subtle_camp_pill(ctx: &egui::Context, alert: &CampTimingAlert) {
-    egui::Area::new(egui::Id::new("hud_subtle_camp_pill"))
-        .fixed_pos(egui::pos2(16.0, 44.0))
-        .show(ctx, |ui| {
-            let (bg, border) = if alert.is_pull {
-                (egui::Color32::from_rgba_unmultiplied(10, 24, 38, 140), egui::Color32::from_rgb(56, 189, 248))
-            } else {
-                (egui::Color32::from_rgba_unmultiplied(10, 32, 22, 140), egui::Color32::from_rgb(52, 211, 153))
-            };
-
-            egui::Frame::NONE
-                .fill(bg)
-                .stroke(egui::Stroke::new(1.0, border))
-                .corner_radius(4)
-                .inner_margin(egui::Margin::symmetric(8, 3))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let text = format!("{} in {}", alert.label, alert.badge);
-                        ui.label(egui::RichText::new(text).color(border).strong().size(11.0));
-                    });
-                });
-        });
 }
 
 fn get_tactical_alerts(

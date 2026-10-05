@@ -12,6 +12,39 @@ impl GsiServer {
         api_client: Arc<tokio::sync::Mutex<crate::api::DotaApiClient>>,
         hero_names_by_id: Arc<HashMap<u32, String>>,
     ) {
+        // A bot lobby can return to the menu without a final GSI payload.
+        // The configured five-second heartbeat lets this watchdog provide a
+        // safe session boundary instead of retaining stale Live Match data.
+        let watchdog_state = shared_state.clone();
+        tokio::spawn(async move {
+            const STALE_AFTER_SECONDS: u64 = 12;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let Ok(mut state) = watchdog_state.lock() else {
+                    continue;
+                };
+                let has_active_game_state = matches!(
+                    state.game_state.as_str(),
+                    "DOTA_GAMERULES_STATE_HERO_SELECTION"
+                        | "DOTA_GAMERULES_STATE_STRATEGY_TIME"
+                        | "DOTA_GAMERULES_STATE_PRE_GAME"
+                        | "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
+                );
+                if state.is_connected
+                    && has_active_game_state
+                    && now.saturating_sub(state.last_update_sec) > STALE_AFTER_SECONDS
+                {
+                    state.reset_to_menu();
+                    state.is_connected = false;
+                    state.gsi_listener_status = "GSI не присылал обновлений более 12 с; состояние матча сброшено".to_string();
+                    println!("GSI: нет heartbeat более {STALE_AFTER_SECONDS} с, состояние матча сброшено");
+                }
+            }
+        });
         tokio::spawn(async move {
             let app_state = (shared_state, api_client, hero_names_by_id);
             let listener_state = app_state.0.clone();

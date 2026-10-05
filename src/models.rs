@@ -103,6 +103,9 @@ pub struct PopularItemEntry {
     pub item_name: String,
     pub localized_name: String,
     pub image_url: String,
+    /// Current schema price. Kept alongside the recommendation so the UI
+    /// never relies on a stale hard-coded item cost.
+    pub cost: u32,
     pub count: u32,
     pub percentage: f32,
 }
@@ -196,9 +199,11 @@ pub struct TrackedSpell {
     pub base_cd: i32,
     pub cooldowns: Vec<i32>,
     pub ability_image: String,
-    /// Actual ultimate tier (1..=3). This is distinct from the hero level:
-    /// GSI may expose neither during a normal player match.
-    pub ultimate_level: Option<u8>,
+    /// Actual learned level for this cooldown-tracked ability. GSI normally
+    /// cannot disclose enemy skill allocation, so this stays user-adjustable.
+    pub ability_level: Option<u8>,
+    pub max_level: u8,
+    pub is_ultimate: bool,
     pub enemy_level: Option<u32>,
     pub on_cooldown_until: Option<i32>,
 }
@@ -573,7 +578,8 @@ mod tests {
                 hero_name: "Enigma".into(), spell_name: "Black Hole".into(),
                 localized_spell: "Black Hole".into(), ability_key: "enigma_black_hole".into(),
                 base_cd: 180, cooldowns: vec![180, 170, 160], ability_image: String::new(),
-                ultimate_level: Some(1), enemy_level: Some(6), on_cooldown_until: Some(1080),
+                ability_level: Some(1), max_level: 3, is_ultimate: true,
+                enemy_level: Some(6), on_cooldown_until: Some(1080),
             }],
             ..Default::default()
         };
